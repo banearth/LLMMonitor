@@ -74,8 +74,11 @@ fn parse_iso(s: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
 }
 
-/// 取所有窗口里最早的 reset 时间（5h/7天，Claude+Codex）。
-fn earliest_reset(shared: &Shared) -> Option<SystemTime> {
+/// 取所有窗口里「未来」最早的 reset（已加缓冲），**过滤掉已过期的**。
+/// 不过滤的话，某个过期 resetsAt（含 Codex 本地缓存遗留）会让 schedule_next
+/// 返回过去时间 → 下一轮 `now >= next_quota_at` 恒成立 → 空闲态每个 TICK 拉一次，
+/// 反而更容易触发限流。
+fn earliest_future_reset(shared: &Shared, now: SystemTime) -> Option<SystemTime> {
     let st = shared.lock().unwrap();
     [
         &st.claude.five_hour,
@@ -86,21 +89,23 @@ fn earliest_reset(shared: &Shared) -> Option<SystemTime> {
     .into_iter()
     .filter_map(|w| w.as_ref().and_then(|x| x.resets_at.as_deref()))
     .filter_map(parse_iso)
+    .map(|r| r + RESET_BUFFER)
+    .filter(|r| *r > now) // 只取未来的 reset
     .min()
 }
 
-/// 决定下次拉额度的时间点。
+/// 决定下次拉额度的时间点。保证返回值 > now（不会退化成每 tick 拉）。
 fn schedule_next(shared: &Shared, active: bool, now: SystemTime) -> SystemTime {
-    let reset = earliest_reset(shared).map(|r| r + RESET_BUFFER);
+    let reset = earliest_future_reset(shared, now);
     if active {
-        // 活跃：每 100s 一次，但若 reset 更近则取 reset（极少见）
+        // 活跃：每 100s 一次，但若未来 reset 更近则取 reset（极少见）
         let periodic = now + ACTIVE_INTERVAL;
         match reset {
             Some(r) if r < periodic => r,
             _ => periodic,
         }
     } else {
-        // 空闲：直接睡到下一个 reset；拿不到 reset 则用兜底心跳
+        // 空闲：睡到下一个未来 reset；没有未来 reset 则用兜底心跳
         reset.unwrap_or(now + IDLE_FALLBACK)
     }
 }
@@ -233,4 +238,87 @@ fn refresh(
 
     let _ = handle.emit("state-updated", snapshot);
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state;
+
+    fn shared_with(claude_5h: Option<&str>, claude_7d: Option<&str>) -> Shared {
+        let s = state::new_shared();
+        {
+            let mut st = s.lock().unwrap();
+            st.claude.five_hour = claude_5h.map(|iso| state::Window {
+                remaining: 50.0,
+                resets_at: Some(iso.to_string()),
+            });
+            st.claude.seven_day = claude_7d.map(|iso| state::Window {
+                remaining: 50.0,
+                resets_at: Some(iso.to_string()),
+            });
+        }
+        s
+    }
+
+    /// 相对 now 的秒数（未来为正、过去为负）。
+    fn secs_from_now(t: &SystemTime) -> i64 {
+        match t.duration_since(SystemTime::now()) {
+            Ok(d) => d.as_secs() as i64,
+            Err(e) => -(e.duration().as_secs() as i64),
+        }
+    }
+
+    fn iso_offset(secs: i64) -> String {
+        (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339()
+    }
+
+    #[test]
+    fn idle_past_reset_ignored_uses_fallback() {
+        // 关键回归：唯一的 reset 已过期 → 必须忽略 → 走兜底，绝不返回过去时间。
+        let s = shared_with(Some(&iso_offset(-3600)), None);
+        let now = SystemTime::now();
+        let next = schedule_next(&s, false, now);
+        assert!(next > now, "空闲态 next 必须在未来（防每 tick 拉）");
+        let d = secs_from_now(&next);
+        assert!((d - IDLE_FALLBACK.as_secs() as i64).abs() <= 10, "应≈兜底心跳, 实得 {d}s");
+    }
+
+    #[test]
+    fn idle_future_reset_adopted() {
+        let s = shared_with(Some(&iso_offset(1800)), None); // 30 分钟后
+        let next = schedule_next(&s, false, SystemTime::now());
+        let d = secs_from_now(&next);
+        let want = 1800 + RESET_BUFFER.as_secs() as i64;
+        assert!((d - want).abs() <= 10, "应≈未来 reset+缓冲, 实得 {d}s");
+    }
+
+    #[test]
+    fn idle_no_reset_uses_fallback() {
+        let s = shared_with(None, None);
+        let next = schedule_next(&s, false, SystemTime::now());
+        let d = secs_from_now(&next);
+        assert!((d - IDLE_FALLBACK.as_secs() as i64).abs() <= 10, "无 reset 应走兜底, 实得 {d}s");
+    }
+
+    #[test]
+    fn active_past_reset_ignored_uses_interval() {
+        // 关键回归：过期 reset + 活跃 → 应是 100s 周期，绝不退化成过去时间。
+        let s = shared_with(Some(&iso_offset(-3600)), None);
+        let now = SystemTime::now();
+        let next = schedule_next(&s, true, now);
+        assert!(next > now);
+        let d = secs_from_now(&next);
+        assert!((d - ACTIVE_INTERVAL.as_secs() as i64).abs() <= 5, "应≈活跃周期, 实得 {d}s");
+    }
+
+    #[test]
+    fn active_near_future_reset_preempts_interval() {
+        // 未来 reset 比 100s 更近 → 取 reset。
+        let s = shared_with(Some(&iso_offset(30)), None); // 30s + 缓冲15 = 45s < 100s
+        let next = schedule_next(&s, true, SystemTime::now());
+        let d = secs_from_now(&next);
+        assert!(d < ACTIVE_INTERVAL.as_secs() as i64, "应取更近的 reset, 实得 {d}s");
+        assert!((d - 45).abs() <= 10, "应≈45s, 实得 {d}s");
+    }
 }

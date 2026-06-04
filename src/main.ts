@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+
+const WIN_W = 190;
 
 // ===== 与 Rust 端 state.rs 对齐的类型 =====
 interface Win {
@@ -173,6 +175,82 @@ function setTodayLine(id: string, p: Provider) {
   el.innerHTML = `<span class="amt">${fmtCost(p.todayCost)}</span> · <span class="amt">${fmtTokens(p.todayTokens)}</span> tok`;
 }
 
+// ===== 信号隧道 =====
+interface Chip {
+  id: string;
+  tool: string; // claude | codex
+  project: string;
+  state: string; // done | waiting | error
+  since: string;
+  trigger: string;
+}
+
+const MAX_VISIBLE = 5; // 最多叠 5 条，多了暂不显示
+
+function stateLabel(s: string): string {
+  return s === "done" ? "完成" : s === "waiting" ? "等你处理" : "出错/中断";
+}
+
+/** 把窗口高度收紧到内容（卡片 + 信号条），条增减时窗口随之变高/变矮。 */
+function resizeWindow() {
+  requestAnimationFrame(() => {
+    const root = document.getElementById("root");
+    if (!root) return;
+    const h = Math.ceil(root.getBoundingClientRect().height);
+    getCurrentWindow()
+      .setSize(new LogicalSize(WIN_W, h))
+      .catch(() => {});
+  });
+}
+
+/** 点击该条 → 淡出 → 通知后端 dismiss。 */
+function attachClick(el: HTMLElement, c: Chip) {
+  el.addEventListener("click", (e) => {
+    e.stopPropagation();
+    el.classList.add("fading");
+    window.setTimeout(() => {
+      invoke("dismiss_chip", { id: c.id, trigger: c.trigger }).catch(() => {});
+    }, 140);
+  });
+}
+
+function renderChips(chips: Chip[]) {
+  const stack = $("stack");
+  if (!stack) return;
+  const root = $("root");
+  stack.innerHTML = "";
+
+  if (!chips.length) {
+    stack.classList.add("empty");
+    root?.classList.remove("has-bars");
+    resizeWindow();
+    return;
+  }
+  stack.classList.remove("empty");
+  root?.classList.add("has-bars");
+
+  for (const c of chips.slice(0, MAX_VISIBLE)) {
+    const el = document.createElement("div");
+    el.className = `sigbar ${c.state}`;
+    el.title = `${c.tool === "claude" ? "Claude" : "Codex"} · ${c.project} · ${stateLabel(c.state)}`;
+    const ico = document.createElement("span");
+    ico.className = `tico ${c.tool}`;
+    ico.textContent = c.tool === "claude" ? "✷" : "◎";
+    const txt = document.createElement("span");
+    txt.className = "ptxt";
+    txt.textContent = c.project;
+    const st = document.createElement("span");
+    st.className = "st";
+    st.textContent = stateLabel(c.state);
+    el.appendChild(ico);
+    el.appendChild(txt);
+    el.appendChild(st);
+    attachClick(el, c);
+    stack.appendChild(el);
+  }
+  resizeWindow();
+}
+
 // ===== 启动 =====
 window.addEventListener("DOMContentLoaded", async () => {
   $("close")?.addEventListener("click", (e) => {
@@ -194,11 +272,18 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   await listen<AppState>("state-updated", (e) => render(e.payload));
+  await listen<Chip[]>("chips-updated", (e) => renderChips(e.payload));
 
   // 首帧兜底：主动拉一次
   try {
     const s = await invoke<AppState>("get_state");
     render(s);
+  } catch (_) {
+    /* 后台线程稍后会推送 */
+  }
+  try {
+    const chips = await invoke<Chip[]>("get_chips");
+    renderChips(chips);
   } catch (_) {
     /* 后台线程稍后会推送 */
   }

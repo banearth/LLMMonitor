@@ -7,6 +7,7 @@
     <title>LLMMonitor</title>
   </head>
   <body>
+    <div id="root">
     <div class="card" data-tauri-drag-region>
       <button id="close" class="close" title="关闭">✕</button>
 
@@ -52,6 +53,10 @@
         </div>
         <div class="note" id="codex-note"></div>
       </section>
+    </div>
+
+    <!-- ===== 信号条：卡片下方竖向叠加 ===== -->
+    <div class="stack empty" id="stack"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

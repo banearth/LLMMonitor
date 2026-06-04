@@ -180,6 +180,7 @@ interface Chip {
   id: string;
   tool: string; // claude | codex
   project: string;
+  folder: string;
   state: string; // done | waiting | error
   since: string;
   trigger: string;
@@ -232,7 +233,11 @@ function renderChips(chips: Chip[]) {
   for (const c of chips.slice(0, MAX_VISIBLE)) {
     const el = document.createElement("div");
     el.className = `sigbar ${c.state}`;
-    el.title = `${c.tool === "claude" ? "Claude" : "Codex"} · ${c.project} · ${stateLabel(c.state)}`;
+    const toolName = c.tool === "claude" ? "Claude" : "Codex";
+    const parts = [toolName];
+    if (c.folder && c.folder !== c.project) parts.push(c.folder); // 仓库名（与标题不同才加，避免重复）
+    parts.push(c.project, stateLabel(c.state));
+    el.title = parts.join(" · ");
     const ico = document.createElement("span");
     ico.className = `tico ${c.tool}`;
     ico.textContent = c.tool === "claude" ? "✷" : "◎";

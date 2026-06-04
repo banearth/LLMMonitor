@@ -25,7 +25,8 @@ const TICK: Duration = Duration::from_secs(4); // 检测节奏
 pub struct Chip {
     pub id: String,
     pub tool: String,    // claude | codex
-    pub project: String,
+    pub project: String, // 显示名（Claude=aiTitle / Codex=仓库名）
+    pub folder: String,  // 仓库文件夹名（cwd 末段），tooltip 用
     pub state: String,   // done | waiting | error
     pub since: String,   // 触发条目 ISO 时间
     pub trigger: String, // 触发条目签名（=since），dismiss 比对用
@@ -173,16 +174,20 @@ fn classify_claude(path: &Path) -> Option<Chip> {
         _ => return None, // user => 工作中
     };
 
+    let folder = cwd
+        .as_deref()
+        .map(basename)
+        .unwrap_or_else(|| folder_fallback(path));
     let project = ai_title
         .or_else(|| head_find(path, "aiTitle"))
         .filter(|s| !s.is_empty())
-        .or_else(|| cwd.as_deref().map(basename))
-        .unwrap_or_else(|| folder_fallback(path));
+        .unwrap_or_else(|| folder.clone());
     let id = path.file_stem()?.to_string_lossy().to_string();
     Some(Chip {
         id,
         tool: "claude".into(),
         project,
+        folder,
         state: state.into(),
         since: last_ts.clone(),
         trigger: last_ts,
@@ -245,6 +250,7 @@ fn classify_codex(path: &Path) -> Option<Chip> {
     Some(Chip {
         id,
         tool: "codex".into(),
+        folder: project.clone(),
         project,
         state: state.into(),
         since: last_ts.clone(),

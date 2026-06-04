@@ -1,44 +1,117 @@
-//! 后台采集线程：快节奏刷新本地用量，慢节奏拉取额度，合并状态并 emit 给前端。
+//! 后台采集线程：
+//! - 本地用量（今日 token/花费）：每 TICK(20s) 扫一次（本地 IO），用来刷新底部数字 + 探测活动。
+//! - 额度接口（5h/7天）：自适应轮询 ——
+//!     · 活跃（最近在烧 token）→ 每 ACTIVE_INTERVAL(100s) 刷一次，看着剩余往下掉；
+//!     · 空闲 → 不按表轮询，直接睡到下一个 reset 时间点再刷（响应里带 resetsAt，空闲时唯一会变的就是 reset）；
+//!     · 从空闲恢复 / 手动⟳ / 启动 → 立即刷。
 use crate::state::Shared;
 use crate::{auth, quota, usage};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 
-/// 本地用量刷新节奏。
-const TICK: Duration = Duration::from_secs(20);
-/// 每隔几个 tick 拉一次额度接口（5 × 20s = 100s）。第 0 个 tick 会立即拉。
-const QUOTA_EVERY: u32 = 5;
+const TICK: Duration = Duration::from_secs(20); // 本地用量刷新 / 活动探测节奏
+const ACTIVE_INTERVAL: Duration = Duration::from_secs(100); // 活跃期额度刷新间隔
+const IDLE_AFTER: Duration = Duration::from_secs(300); // 多久没 token 增长算空闲
+const RESET_BUFFER: Duration = Duration::from_secs(15); // reset 后缓冲再刷，确保已跳变
+const IDLE_FALLBACK: Duration = Duration::from_secs(600); // 拿不到 reset 时间时的兜底心跳
 
-/// `wake` 用于“立即刷新”：前端点 ⟳ 时通过它唤醒本循环并强制拉一次额度。
 pub fn run(handle: AppHandle, shared: Shared, wake: Receiver<()>) {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .unwrap_or_else(|_| reqwest::blocking::Client::new());
 
-    let mut tick: u32 = 0;
-    let mut forced = false;
+    let mut next_quota_at = SystemTime::now(); // 启动即到期 → 立即拉
+    let mut force = true; // 启动强制拉一次
+    let mut prev_tokens: Option<u64> = None;
+    let mut last_active = Instant::now();
+    let mut was_active = true;
+
     loop {
-        let do_quota = forced || tick % QUOTA_EVERY == 0;
-        refresh(&handle, &shared, &client, do_quota);
-        tick = tick.wrapping_add(1);
+        let now = SystemTime::now();
+        let do_quota = force || now >= next_quota_at;
+        force = false;
+
+        let total = refresh(&handle, &shared, &client, do_quota);
+
+        // 活动探测：今日 token 增长 = 在烧额度
+        let grew = prev_tokens.map(|p| total > p).unwrap_or(false);
+        prev_tokens = Some(total);
+        if grew {
+            last_active = Instant::now();
+        }
+        let active = last_active.elapsed() < IDLE_AFTER;
+
+        if do_quota {
+            // 刚拉过 → 根据活跃与否安排下次
+            next_quota_at = schedule_next(&shared, active, now);
+        } else if active && !was_active {
+            // 从空闲恢复、但本 tick 没到点 → 提前到下一 tick 立即拉
+            next_quota_at = now;
+        }
+        was_active = active;
 
         match wake.recv_timeout(TICK) {
             Ok(_) => {
-                // 手动刷新：清空积压的多次点击，强制下一轮立即拉额度并重置节奏。
-                while wake.try_recv().is_ok() {}
-                forced = true;
-                tick = 0;
+                while wake.try_recv().is_ok() {} // 合并多次点击
+                force = true; // 手动⟳ → 立即拉
             }
-            Err(RecvTimeoutError::Timeout) => forced = false,
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
-fn refresh(handle: &AppHandle, shared: &Shared, client: &reqwest::blocking::Client, do_quota: bool) {
+/// 解析 ISO 时间为 SystemTime。
+fn parse_iso(s: &str) -> Option<SystemTime> {
+    let dt: DateTime<Utc> = DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&Utc);
+    let secs = dt.timestamp();
+    if secs < 0 {
+        return None;
+    }
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// 取所有窗口里最早的 reset 时间（5h/7天，Claude+Codex）。
+fn earliest_reset(shared: &Shared) -> Option<SystemTime> {
+    let st = shared.lock().unwrap();
+    [
+        &st.claude.five_hour,
+        &st.claude.seven_day,
+        &st.codex.five_hour,
+        &st.codex.seven_day,
+    ]
+    .into_iter()
+    .filter_map(|w| w.as_ref().and_then(|x| x.resets_at.as_deref()))
+    .filter_map(parse_iso)
+    .min()
+}
+
+/// 决定下次拉额度的时间点。
+fn schedule_next(shared: &Shared, active: bool, now: SystemTime) -> SystemTime {
+    let reset = earliest_reset(shared).map(|r| r + RESET_BUFFER);
+    if active {
+        // 活跃：每 100s 一次，但若 reset 更近则取 reset（极少见）
+        let periodic = now + ACTIVE_INTERVAL;
+        match reset {
+            Some(r) if r < periodic => r,
+            _ => periodic,
+        }
+    } else {
+        // 空闲：直接睡到下一个 reset；拿不到 reset 则用兜底心跳
+        reset.unwrap_or(now + IDLE_FALLBACK)
+    }
+}
+
+/// 刷新一次：本地用量必刷；额度按 do_quota。返回今日 token 总量（用于活动探测）。
+fn refresh(
+    handle: &AppHandle,
+    shared: &Shared,
+    client: &reqwest::blocking::Client,
+    do_quota: bool,
+) -> u64 {
     // ---- 锁外完成所有 IO（文件 + 网络）----
     let claude_present = auth::claude_present();
     let codex_present = auth::codex_present();
@@ -60,7 +133,7 @@ fn refresh(handle: &AppHandle, shared: &Shared, client: &reqwest::blocking::Clie
     let codex_cache = if do_quota { quota::read_codex_cache() } else { None };
 
     // ---- 单次持锁写回 ----
-    let snapshot = {
+    let (snapshot, total) = {
         let mut st = shared.lock().unwrap();
         let mut synced = false;
 
@@ -154,8 +227,10 @@ fn refresh(handle: &AppHandle, shared: &Shared, client: &reqwest::blocking::Clie
         if synced {
             st.last_sync = Some(Utc::now().to_rfc3339());
         }
-        st.clone()
+        let total = st.claude.today_tokens.unwrap_or(0) + st.codex.today_tokens.unwrap_or(0);
+        (st.clone(), total)
     };
 
     let _ = handle.emit("state-updated", snapshot);
+    total
 }

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LLMMonitor</title>
+  </head>
+  <body>
+    <div class="card" data-tauri-drag-region>
+      <button id="close" class="close" title="关闭">✕</button>
+
+      <!-- ===== Claude ===== -->
+      <section class="zone" id="zone-claude" data-tauri-drag-region>
+        <div class="head" data-tauri-drag-region>
+          <span class="brand claude">✷ Claude</span>
+          <span class="sync" id="sync" title="点击立即刷新"><span class="sync-ico" id="sync-ico">⟳</span><span id="sync-time">--:--</span></span>
+        </div>
+        <div class="primary" data-tauri-drag-region>
+          <div class="big">
+            <span class="pct" id="claude-pct">--</span><span class="punit">%</span>
+            <span class="plabel">剩余</span>
+          </div>
+          <div class="bar"><div class="fill" id="claude-bar"></div></div>
+        </div>
+        <div class="rows">
+          <div class="row"><span class="k">5h</span><span class="v" id="claude-5h">重置 --:--</span></div>
+          <div class="row"><span class="k">7d</span><span class="v" id="claude-7d">-- · --</span></div>
+          <div class="row today"><span class="k">今日</span><span class="v" id="claude-today">$-- · -- tok</span></div>
+        </div>
+        <div class="note" id="claude-note"></div>
+      </section>
+
+      <div class="divider"></div>
+
+      <!-- ===== Codex ===== -->
+      <section class="zone" id="zone-codex" data-tauri-drag-region>
+        <div class="head" data-tauri-drag-region>
+          <span class="brand codex">◎ Codex</span>
+        </div>
+        <div class="primary" data-tauri-drag-region>
+          <div class="big">
+            <span class="pct" id="codex-pct">--</span><span class="punit">%</span>
+            <span class="plabel">剩余</span>
+          </div>
+          <div class="bar"><div class="fill" id="codex-bar"></div></div>
+        </div>
+        <div class="rows">
+          <div class="row"><span class="k">5h</span><span class="v" id="codex-5h">重置 --:--</span></div>
+          <div class="row"><span class="k">7d</span><span class="v" id="codex-7d">-- · --</span></div>
+          <div class="row today"><span class="k">今日</span><span class="v" id="codex-today">$-- · -- tok</span></div>
+        </div>
+        <div class="note" id="codex-note"></div>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -17,17 +17,10 @@ pub struct QuotaResult {
     pub logged_in: bool,
 }
 
-/// utilization 标度归一：>1 视为百分比，否则按 0..1 比例 ×100。
-fn util_to_pct(u: f64) -> f64 {
-    if u > 1.0 {
-        u
-    } else {
-        u * 100.0
-    }
-}
-
+/// 接口返回的 utilization / used_percent 都是 0–100 的百分比，直接用。
+/// （注意：不能把 ≤1 当成 0..1 小数 ×100，否则 1% 会被误算成 100%。）
 fn remaining_from_util(util: f64) -> f64 {
-    (100.0 - util_to_pct(util)).clamp(0.0, 100.0)
+    (100.0 - util).clamp(0.0, 100.0)
 }
 
 fn epoch_to_iso(secs: i64) -> Option<String> {

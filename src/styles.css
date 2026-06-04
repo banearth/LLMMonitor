@@ -309,8 +309,7 @@ body {
   color: var(--danger);
 }
 .sigbar:hover {
-  filter: brightness(1.1);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(36, 41, 54, 0.96); /* 稍亮的不透明深色高亮，别用半透明白以免透出桌面 */
 }
 .sigbar.fading {
   opacity: 0;

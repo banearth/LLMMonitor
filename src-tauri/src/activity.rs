@@ -1,6 +1,7 @@
 //! 活动检测引擎：从会话日志判定每个会话的「信号灯」状态。
 //! - 🟢 done    : 最新有意义条目 = assistant end_turn/stop_sequence（Claude）或 task_complete（Codex）
-//! - 🟡 waiting : 最新 = tool_use，且「静默够久 + 文件够久没写」才算真的等你（避免长工具运行误报）
+//! - 🟡 waiting : ① 在提问/等拍板（AskUserQuestion/ExitPlanMode）→ 立即黄灯；
+//!               ② 普通 tool_use 且「静默够久 + 文件够久没写」才算真的等你（避免长工具运行误报）
 //! - 🔴 error   : 最新 = api_error（Claude）或 turn_aborted（Codex）
 //! 纯读日志文本，不监听键盘/屏幕。chip 是「日志状态 + 时间 + dismiss 标记」的纯投影。
 //!
@@ -134,9 +135,26 @@ fn folder_fallback(path: &Path) -> String {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Done,
-    ToolUse,
+    ToolUse, // 普通工具（Bash 等），可能长跑 → 走阈值判 waiting
+    Asking,  // 在向你提问/等拍板（AskUserQuestion/ExitPlanMode 等）→ 立即 waiting
     Error,
     Working,
+}
+
+/// 该 assistant 消息是否在「阻塞等用户决定」的工具上（提问 / 计划批准）。
+fn is_user_blocking_tool(msg: &Value) -> bool {
+    msg.get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks.iter().any(|b| {
+                b.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                    && matches!(
+                        b.get("name").and_then(|n| n.as_str()),
+                        Some("AskUserQuestion") | Some("ExitPlanMode") | Some("EnterPlanMode")
+                    )
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// 一次 tail 解析的结果（只在文件 mtime 变化时才重算，缓存复用）。
@@ -207,13 +225,19 @@ fn parse_claude(path: &Path) -> Option<Parsed> {
         }
         match v.get("type").and_then(|x| x.as_str()) {
             Some("assistant") => {
-                let stop = v
-                    .get("message")
+                let msg = v.get("message");
+                let stop = msg
                     .and_then(|m| m.get("stop_reason"))
                     .and_then(|x| x.as_str());
                 kind = match stop {
                     Some("end_turn") | Some("stop_sequence") => Kind::Done,
-                    Some("tool_use") => Kind::ToolUse,
+                    Some("tool_use") => {
+                        if msg.map(is_user_blocking_tool).unwrap_or(false) {
+                            Kind::Asking
+                        } else {
+                            Kind::ToolUse
+                        }
+                    }
                     _ => Kind::Working,
                 };
                 last_ts = ts;
@@ -312,6 +336,8 @@ fn decide(p: &Parsed, mtime: SystemTime) -> Option<Chip> {
         Kind::Done => "done",
         Kind::Error => "error",
         Kind::Working => return None,
+        // 在提问/等拍板 → 它根本走不了，立即黄灯，不走阈值。
+        Kind::Asking => "waiting",
         Kind::ToolUse => {
             if elapsed_secs(&p.last_ts) >= WAITING_THRESHOLD_SECS
                 && mtime_age_secs(mtime) >= RUNNING_GRACE_SECS
@@ -541,6 +567,14 @@ mod tests {
     fn working_hidden() {
         let c = decide(&parsed(Kind::Working, "2020-01-01T00:00:00Z"), SystemTime::now());
         assert!(c.is_none());
+    }
+
+    #[test]
+    fn asking_is_immediate_waiting() {
+        // 在提问（AskUserQuestion）→ 即使时间戳就是现在、文件刚写，也立即黄灯
+        let now_ts = Utc::now().to_rfc3339();
+        let c = decide(&parsed(Kind::Asking, &now_ts), SystemTime::now());
+        assert_eq!(c.unwrap().state, "waiting");
     }
 
     #[test]

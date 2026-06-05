@@ -1,0 +1,48 @@
+name: Release
+
+# 推一个 v* 版本 tag 就在云端 Windows 上编译并自动发布安装包。
+# 平时 commit/push 不会触发，只有 tag 才会。
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    permissions:
+      contents: write # 允许 GITHUB_TOKEN 创建/更新 Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust (stable msvc)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build & publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "LLMMonitor ${{ github.ref_name }}"
+          releaseBody: |
+            常驻 Windows 桌面的 AI 额度 + 完工提醒悬浮窗。
+
+            下载 **`*-setup.exe`**（推荐，缺 WebView2 自动装）或免安装绿色版 **`*-portable.exe`**。
+            前提：本机装了 Claude Code 或 Codex 并已登录。未签名，首次运行点「更多信息→仍要运行」。
+          releaseDraft: false
+          prerelease: false

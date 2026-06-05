@@ -1,7 +1,9 @@
 //! 活动检测引擎：从会话日志判定每个会话的「信号灯」状态。
 //! - 🟢 done    : 最新有意义条目 = assistant end_turn/stop_sequence（Claude）或 task_complete（Codex）
-//! - 🟡 waiting : ① 在提问/等拍板（AskUserQuestion/ExitPlanMode）→ 立即黄灯；
-//!               ② 普通 tool_use 且「静默够久 + 文件够久没写」才算真的等你（避免长工具运行误报）
+//! - 🟡 waiting : 在提问/等拍板（AskUserQuestion/ExitPlanMode）→ 立即黄灯。
+//!               普通 tool_use 卡住默认不判黄灯（长命令会误报），仅在用户开启
+//!               stall_to_waiting 时才按「静默够久+文件够久没写」判。
+//! 显示哪些灯 / 是否弹通知，由用户设置 show_done/waiting/error 控制（见 config.rs）。
 //! - 🔴 error   : 最新 = api_error（Claude）或 turn_aborted（Codex）
 //! 纯读日志文本，不监听键盘/屏幕。chip 是「日志状态 + 时间 + dismiss 标记」的纯投影。
 //!
@@ -328,14 +330,23 @@ fn parse_codex(path: &Path) -> Option<Parsed> {
 /// 且文件已 ≥ RUNNING_GRACE_SECS 没有任何写入，才判为「等你」。
 /// 这样长工具运行（文件近期仍在写、或还没到阈值）不会立刻黄灯；
 /// 只有真的长时间无任何后续才黄灯；user 继续输入则 kind=Working，直接不出灯。
-fn decide(p: &Parsed, mtime: SystemTime, waiting_threshold: i64, running_grace: i64) -> Option<Chip> {
+fn decide(
+    p: &Parsed,
+    mtime: SystemTime,
+    stall_enabled: bool,
+    waiting_threshold: i64,
+    running_grace: i64,
+) -> Option<Chip> {
     let state = match p.kind {
         Kind::Done => "done",
         Kind::Error => "error",
         Kind::Working => return None,
+        // 提问/计划批准 → 一定是等你，立即黄灯。
         Kind::Asking => "waiting",
+        // 普通工具卡住：默认不判黄灯（长命令会误报）；仅当用户开启才按阈值判。
         Kind::ToolUse => {
-            if elapsed_secs(&p.last_ts) >= waiting_threshold
+            if stall_enabled
+                && elapsed_secs(&p.last_ts) >= waiting_threshold
                 && mtime_age_secs(mtime) >= running_grace
             {
                 "waiting"
@@ -437,10 +448,10 @@ impl Scanner {
             self.last_discovery = Some(Instant::now());
         }
 
-        // 每 tick 从设置读阈值（用户修改后立即生效）
-        let (wt, rg) = {
+        // 每 tick 从设置读阈值/开关（用户修改后立即生效）
+        let (stall, wt, rg) = {
             let s = self.settings.lock().unwrap();
-            (s.waiting_threshold_secs, s.running_grace_secs)
+            (s.stall_to_waiting, s.waiting_threshold_secs, s.running_grace_secs)
         };
 
         let cutoff = SystemTime::now() - Duration::from_secs(ACTIVE_WINDOW_SECS);
@@ -465,7 +476,7 @@ impl Scanner {
                 e.mtime = mtime;
             }
             if let Some(p) = &e.parsed {
-                if let Some(c) = decide(p, mtime, wt, rg) {
+                if let Some(c) = decide(p, mtime, stall, wt, rg) {
                     chips.push(c);
                 }
             }
@@ -495,6 +506,33 @@ fn sig(c: &Chip) -> String {
     format!("{}|{}|{}", c.id, c.state, c.trigger)
 }
 
+/// 当前要给前端的信号条 = 候选集里没被 dismiss 的。
+/// （关闭的颜色其 chip 会被自动 dismiss，所以这里只看 dismiss 即可。）
+pub fn visible_chips(activity: &SharedActivity) -> Vec<Chip> {
+    let st = activity.lock().unwrap();
+    let dismissed = &st.dismissed;
+    st.chips
+        .iter()
+        .filter(|c| dismissed.get(&c.id).map(|d| d != &c.trigger).unwrap_or(true))
+        .cloned()
+        .collect()
+}
+
+/// 把某颜色当前的 chip 全部标记已处理（用户关掉该颜色通知时调用）。
+/// 之后开回来也不会复活——只有全新的完成才会再出现。
+pub fn mute_color(activity: &SharedActivity, state: &str) {
+    let mut st = activity.lock().unwrap();
+    let targets: Vec<(String, String)> = st
+        .chips
+        .iter()
+        .filter(|c| c.state == state)
+        .map(|c| (c.id.clone(), c.trigger.clone()))
+        .collect();
+    for (id, trig) in targets {
+        st.dismissed.insert(id, trig);
+    }
+}
+
 fn notify(handle: &AppHandle, c: &Chip) {
     use tauri_plugin_notification::NotificationExt;
     let (icon, label) = match c.state.as_str() {
@@ -519,29 +557,38 @@ pub fn run(handle: AppHandle, shared: SharedActivity, settings: crate::config::S
     let mut prev: HashSet<String> = HashSet::new();
     loop {
         let computed = scanner.tick();
+        // 关闭的颜色：当前及之后新出现的 chip 都自动 dismiss（订阅式语义——
+        // 关了不再出现、当前也清掉；开回来不复活旧的，只显示全新的）。
+        let (sd, sw, se) = {
+            let c = settings.lock().unwrap();
+            (c.show_done, c.show_waiting, c.show_error)
+        };
         let visible: Vec<Chip> = {
             let mut st = shared.lock().unwrap();
-            let visible: Vec<Chip> = computed
-                .into_iter()
+            for c in &computed {
+                let muted = match c.state.as_str() {
+                    "done" => !sd,
+                    "waiting" => !sw,
+                    "error" => !se,
+                    _ => false,
+                };
+                if muted {
+                    st.dismissed.insert(c.id.clone(), c.trigger.clone());
+                }
+            }
+            let visible = computed
+                .iter()
                 .filter(|c| st.dismissed.get(&c.id).map(|d| d != &c.trigger).unwrap_or(true))
-                .collect();
-            st.chips = visible.clone();
+                .cloned()
+                .collect::<Vec<_>>();
+            st.chips = computed;
             visible
         };
 
         if !first {
-            let cfg = settings.lock().unwrap();
             for c in &visible {
                 if !prev.contains(&sig(c)) {
-                    let should = match c.state.as_str() {
-                        "done" => cfg.toast_done,
-                        "waiting" => cfg.toast_waiting,
-                        "error" => cfg.toast_error,
-                        _ => false,
-                    };
-                    if should {
-                        notify(&handle, c);
-                    }
+                    notify(&handle, c);
                 }
             }
         }
@@ -570,19 +617,19 @@ mod tests {
 
     #[test]
     fn done_shows() {
-        let c = decide(&parsed(Kind::Done, "2020-01-01T00:00:00Z"), SystemTime::now(), 180, 60);
+        let c = decide(&parsed(Kind::Done, "2020-01-01T00:00:00Z"), SystemTime::now(), true, 180, 60);
         assert_eq!(c.unwrap().state, "done");
     }
 
     #[test]
     fn error_shows() {
-        let c = decide(&parsed(Kind::Error, "2020-01-01T00:00:00Z"), SystemTime::now(), 180, 60);
+        let c = decide(&parsed(Kind::Error, "2020-01-01T00:00:00Z"), SystemTime::now(), true, 180, 60);
         assert_eq!(c.unwrap().state, "error");
     }
 
     #[test]
     fn working_hidden() {
-        let c = decide(&parsed(Kind::Working, "2020-01-01T00:00:00Z"), SystemTime::now(), 180, 60);
+        let c = decide(&parsed(Kind::Working, "2020-01-01T00:00:00Z"), SystemTime::now(), true, 180, 60);
         assert!(c.is_none());
     }
 
@@ -590,21 +637,21 @@ mod tests {
     fn asking_is_immediate_waiting() {
         // 在提问（AskUserQuestion）→ 即使时间戳就是现在、文件刚写，也立即黄灯
         let now_ts = Utc::now().to_rfc3339();
-        let c = decide(&parsed(Kind::Asking, &now_ts), SystemTime::now(), 180, 60);
+        let c = decide(&parsed(Kind::Asking, &now_ts), SystemTime::now(), true, 180, 60);
         assert_eq!(c.unwrap().state, "waiting");
     }
 
     #[test]
     fn tooluse_recent_not_waiting() {
         let now_ts = Utc::now().to_rfc3339();
-        let c = decide(&parsed(Kind::ToolUse, &now_ts), SystemTime::now(), 180, 60);
+        let c = decide(&parsed(Kind::ToolUse, &now_ts), SystemTime::now(), true, 180, 60);
         assert!(c.is_none());
     }
 
     #[test]
     fn tooluse_stale_but_recent_write_not_waiting() {
         let old = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
-        let c = decide(&parsed(Kind::ToolUse, &old), SystemTime::now(), 180, 60);
+        let c = decide(&parsed(Kind::ToolUse, &old), SystemTime::now(), true, 180, 60);
         assert!(c.is_none());
     }
 
@@ -612,7 +659,7 @@ mod tests {
     fn tooluse_stale_and_quiet_waiting() {
         let old = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
         let quiet_mtime = SystemTime::now() - Duration::from_secs(120);
-        let c = decide(&parsed(Kind::ToolUse, &old), quiet_mtime, 180, 60);
+        let c = decide(&parsed(Kind::ToolUse, &old), quiet_mtime, true, 180, 60);
         assert_eq!(c.unwrap().state, "waiting");
     }
 }

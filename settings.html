@@ -9,24 +9,25 @@
   <body>
     <div class="panel">
       <section>
-        <h2>信号灯</h2>
+        <h2>显示哪些信号灯</h2>
+        <label class="row"><span>🟢 完成</span><input type="checkbox" id="sd" /></label>
+        <label class="row"><span>🟡 等你处理</span><input type="checkbox" id="sw" /></label>
+        <label class="row"><span>🔴 出错/中断</span><input type="checkbox" id="se" /></label>
+        <p class="hint">勾选=在小窗显示该颜色的信号条（已安装版还会弹桌面通知）。</p>
+      </section>
+
+      <section>
+        <h2>「等你」判定</h2>
+        <label class="row"><span>普通工具卡住也算等你</span><input type="checkbox" id="stall" /></label>
+        <p class="hint">默认关。开了之后，普通命令静默超过阈值也亮黄灯（长命令可能误报；提问/计划批准始终立即亮，不受此开关影响）。</p>
         <label class="row">
-          <span>「等你」判定阈值</span>
+          <span>卡住阈值</span>
           <span class="ctl"><input type="number" id="waiting" min="10" max="1800" step="10" /> 秒</span>
         </label>
-        <p class="hint">普通工具静默超过这么久才亮黄灯（提问/计划仍立即亮）。默认 180。</p>
         <label class="row">
           <span>「仍在跑」宽限</span>
           <span class="ctl"><input type="number" id="grace" min="5" max="600" step="5" /> 秒</span>
         </label>
-        <p class="hint">文件这段时间内有写入就不算停。默认 60。</p>
-      </section>
-
-      <section>
-        <h2>桌面通知</h2>
-        <label class="row"><span>🟢 完成</span><input type="checkbox" id="td" /></label>
-        <label class="row"><span>🟡 等你处理</span><input type="checkbox" id="tw" /></label>
-        <label class="row"><span>🔴 出错/中断</span><input type="checkbox" id="te" /></label>
       </section>
 
       <section>

@@ -7,14 +7,16 @@ use std::sync::{Arc, Mutex};
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     // ── 信号灯 ──────────────────────────────────────────────────
-    /// tool_use 条目多久没有后续才判「等你」（秒）。
+    /// 显示哪些信号条（同时决定是否在该状态弹桌面通知）。
+    pub show_done: bool,
+    pub show_waiting: bool,
+    pub show_error: bool,
+    /// 普通工具卡住（非提问/计划）是否也判「等你」。默认关——长命令会误报。
+    pub stall_to_waiting: bool,
+    /// 普通工具静默多久才判「等你」（秒，仅 stall_to_waiting 开启时生效）。
     pub waiting_threshold_secs: i64,
     /// 文件多久没写入才视为「工具真停了」（秒）。
     pub running_grace_secs: i64,
-    // ── 通知 ─────────────────────────────────────────────────────
-    pub toast_done: bool,
-    pub toast_waiting: bool,
-    pub toast_error: bool,
     // ── 外观 ─────────────────────────────────────────────────────
     /// 主窗口透明度，0.3–1.0。
     pub opacity: f64,
@@ -28,11 +30,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            show_done: true,
+            show_waiting: true,
+            show_error: true,
+            stall_to_waiting: false,
             waiting_threshold_secs: 180,
             running_grace_secs: 60,
-            toast_done: false,
-            toast_waiting: true,
-            toast_error: true,
             opacity: 1.0,
             idle_after_secs: 300,
             auto_start: false,

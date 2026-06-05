@@ -25,7 +25,7 @@ fn get_state(state: tauri::State<Shared>) -> AppState {
 
 #[tauri::command]
 fn get_chips(state: tauri::State<SharedActivity>) -> Vec<Chip> {
-    state.lock().unwrap().chips.clone()
+    activity::visible_chips(state.inner())
 }
 
 #[tauri::command]
@@ -40,12 +40,11 @@ fn dismiss_chip(
     id: String,
     trigger: String,
 ) {
-    let chips = {
+    {
         let mut st = state.lock().unwrap();
         st.dismissed.insert(id.clone(), trigger.clone());
-        st.chips.retain(|c| !(c.id == id && c.trigger == trigger));
-        st.chips.clone()
-    };
+    }
+    let chips = activity::visible_chips(state.inner());
     let _ = app.emit("chips-updated", &chips);
 }
 
@@ -58,10 +57,17 @@ fn get_settings(s: tauri::State<SharedSettings>) -> Settings {
 fn save_settings(
     app: tauri::AppHandle,
     s: tauri::State<SharedSettings>,
+    activity: tauri::State<SharedActivity>,
     new: Settings,
 ) {
     let opacity = new.opacity.clamp(0.3, 1.0);
     let auto_start = new.auto_start;
+    // 记录旧的显示开关 + 新值，用于检测「开→关」
+    let (old_d, old_w, old_e) = {
+        let g = s.lock().unwrap();
+        (g.show_done, g.show_waiting, g.show_error)
+    };
+    let (new_d, new_w, new_e) = (new.show_done, new.show_waiting, new.show_error);
     {
         let mut guard = s.lock().unwrap();
         *guard = new;
@@ -69,10 +75,22 @@ fn save_settings(
     }
     config::save(&s.lock().unwrap());
 
-    // 通知主窗口更新透明度（前端用 CSS 变量实现）
+    // 颜色从开→关：把当前该颜色的信号条全部标记已处理（清掉且不复活）
+    if old_d && !new_d {
+        activity::mute_color(activity.inner(), "done");
+    }
+    if old_w && !new_w {
+        activity::mute_color(activity.inner(), "waiting");
+    }
+    if old_e && !new_e {
+        activity::mute_color(activity.inner(), "error");
+    }
+
     let _ = app.emit("apply-opacity", opacity);
-    // 立即应用开机自启
     config::set_autostart(auto_start);
+    // 立即刷新信号条（关掉的颜色当场消失）
+    let chips = activity::visible_chips(activity.inner());
+    let _ = app.emit("chips-updated", &chips);
 }
 
 // ── 窗口辅助 ──────────────────────────────────────────────────────────

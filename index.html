@@ -10,12 +10,13 @@
     <div id="root">
     <div class="card" data-tauri-drag-region>
       <button id="close" class="close" title="关闭">✕</button>
+      <!-- 全局：同步时间 + 立即刷新（卡片级，常驻右上角，不随分区显隐）-->
+      <span class="sync" id="sync" title="点击立即刷新"><span class="sync-ico" id="sync-ico">⟳</span><span id="sync-time">--:--</span></span>
 
       <!-- ===== Claude ===== -->
       <section class="zone" id="zone-claude" data-tauri-drag-region>
         <div class="head" data-tauri-drag-region>
           <span class="brand claude">✷ Claude</span>
-          <span class="sync" id="sync" title="点击立即刷新"><span class="sync-ico" id="sync-ico">⟳</span><span id="sync-time">--:--</span></span>
         </div>
         <div class="primary" data-tauri-drag-region>
           <div class="big">

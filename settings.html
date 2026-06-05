@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/settings.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LLMMonitor 设置</title>
+  </head>
+  <body>
+    <div class="panel">
+      <section>
+        <h2>信号灯</h2>
+        <label class="row">
+          <span>「等你」判定阈值</span>
+          <span class="ctl"><input type="number" id="waiting" min="10" max="1800" step="10" /> 秒</span>
+        </label>
+        <p class="hint">普通工具静默超过这么久才亮黄灯（提问/计划仍立即亮）。默认 180。</p>
+        <label class="row">
+          <span>「仍在跑」宽限</span>
+          <span class="ctl"><input type="number" id="grace" min="5" max="600" step="5" /> 秒</span>
+        </label>
+        <p class="hint">文件这段时间内有写入就不算停。默认 60。</p>
+      </section>
+
+      <section>
+        <h2>桌面通知</h2>
+        <label class="row"><span>🟢 完成</span><input type="checkbox" id="td" /></label>
+        <label class="row"><span>🟡 等你处理</span><input type="checkbox" id="tw" /></label>
+        <label class="row"><span>🔴 出错/中断</span><input type="checkbox" id="te" /></label>
+      </section>
+
+      <section>
+        <h2>外观 / 系统</h2>
+        <label class="row">
+          <span>窗口不透明度</span>
+          <span class="ctl"><input type="range" id="op" min="0.3" max="1" step="0.05" /> <b id="opv">100%</b></span>
+        </label>
+        <label class="row">
+          <span>空闲判定</span>
+          <span class="ctl"><input type="number" id="idle" min="60" max="3600" step="30" /> 秒</span>
+        </label>
+        <p class="hint">多久没烧 token 算空闲（空闲时少打额度接口）。默认 300。</p>
+        <label class="row"><span>开机自启</span><input type="checkbox" id="auto" /></label>
+      </section>
+
+      <div class="actions">
+        <span class="saved" id="saved"></span>
+        <button id="close">关闭</button>
+      </div>
+    </div>
+    <script type="module" src="/src/settings.ts"></script>
+  </body>
+</html>

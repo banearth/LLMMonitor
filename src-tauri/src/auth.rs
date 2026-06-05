@@ -1,6 +1,17 @@
 //! 读取本机 Claude / Codex 的登录凭证。
 //! 纯本地读取，不修改任何凭证文件。
+use base64::Engine as _;
 use std::path::PathBuf;
+
+/// 解析 JWT 的 exp 声明（秒）。无需验签，只用于「是否过期」判断。
+fn parse_jwt_exp(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("exp").and_then(|e| e.as_i64())
+}
 
 fn home() -> Option<PathBuf> {
     dirs::home_dir()
@@ -13,8 +24,16 @@ pub struct ClaudeCreds {
     #[allow(dead_code)]
     pub refresh_token: Option<String>,
     /// 过期时间（unix 毫秒）。
-    #[allow(dead_code)]
     pub expires_at: Option<i64>,
+}
+
+impl ClaudeCreds {
+    /// token 是否已过期（expiresAt 是毫秒时间戳）。未知则视为未过期。
+    pub fn is_expired(&self) -> bool {
+        self.expires_at
+            .map(|ms| ms < chrono::Utc::now().timestamp_millis())
+            .unwrap_or(false)
+    }
 }
 
 /// 返回值含义：
@@ -50,6 +69,15 @@ pub struct CodexCreds {
     pub account_id: Option<String>,
     #[allow(dead_code)]
     pub refresh_token: Option<String>,
+}
+
+impl CodexCreds {
+    /// access_token 是 JWT，从 exp 声明（秒）判断是否已过期。未知则视为未过期。
+    pub fn is_expired(&self) -> bool {
+        parse_jwt_exp(&self.access_token)
+            .map(|exp| exp < chrono::Utc::now().timestamp())
+            .unwrap_or(false)
+    }
 }
 
 pub fn read_codex() -> Option<CodexCreds> {

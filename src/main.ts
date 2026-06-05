@@ -4,6 +4,9 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 const WIN_W = 190;
 
+// 禁用 WebView 默认右键菜单（返回/刷新/另存为/打印），桌面小窗不该有
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
 // ===== 与 Rust 端 state.rs 对齐的类型 =====
 interface Win {
   remaining: number; // 0..100
@@ -100,6 +103,13 @@ function $(id: string): HTMLElement | null {
   return document.getElementById(id);
 }
 
+/** 应用窗口不透明度（作用在卡片与信号条上）。 */
+function applyOpacity(o: number) {
+  const v = Math.max(0.3, Math.min(1, o || 1));
+  const root = document.getElementById("root");
+  if (root) root.style.opacity = String(v);
+}
+
 function setText(id: string, text: string) {
   const el = $(id);
   if (el) el.textContent = text;
@@ -164,6 +174,14 @@ function render(state: AppState) {
   // 每家各自的今日 token / API 等价花费（本地日志统计），放在各自区内。
   setTodayLine("claude-today", state.claude);
   setTodayLine("codex-today", state.codex);
+
+  // 只有两区都在时才显示中间分隔线；隐藏某区后重算窗口高度，避免留空白。
+  const divider = document.querySelector(".divider") as HTMLElement | null;
+  if (divider) {
+    divider.style.display =
+      state.claude.present && state.codex.present ? "" : "none";
+  }
+  resizeWindow();
 
   // 数据已更新 → 停止刷新转圈。
   stopSpin();
@@ -278,6 +296,15 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   await listen<AppState>("state-updated", (e) => render(e.payload));
   await listen<Chip[]>("chips-updated", (e) => renderChips(e.payload));
+  await listen<number>("apply-opacity", (e) => applyOpacity(e.payload));
+
+  // 启动时读设置应用透明度
+  try {
+    const s = await invoke<{ opacity: number }>("get_settings");
+    applyOpacity(s.opacity);
+  } catch (_) {
+    /* 用默认不透明 */
+  }
 
   // 首帧兜底：主动拉一次
   try {

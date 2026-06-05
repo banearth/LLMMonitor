@@ -25,10 +25,7 @@ const ACTIVE_WINDOW_SECS: u64 = 15 * 60; // 只跟踪近 15 分钟改动过的�
 const TICK: Duration = Duration::from_secs(4); // 检测节奏（廉价 stat + 状态更新）
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30); // 全量 walk 发现新活跃文件的间隔
 const TAIL_BYTES: u64 = 96 * 1024; // 只读文件尾部
-/// tool_use 静默多久才可能算「等你」（比典型工具运行时长更久，降低误报）。
-const WAITING_THRESHOLD_SECS: i64 = 180;
-/// 文件这段时间内有过写入就视为「仍在跑」，绝不黄灯。
-const RUNNING_GRACE_SECS: i64 = 60;
+// 注：waiting 阈值（默认 180s）/ 仍在跑宽限（默认 60s）现由用户设置提供，见 config.rs。
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -331,16 +328,15 @@ fn parse_codex(path: &Path) -> Option<Parsed> {
 /// 且文件已 ≥ RUNNING_GRACE_SECS 没有任何写入，才判为「等你」。
 /// 这样长工具运行（文件近期仍在写、或还没到阈值）不会立刻黄灯；
 /// 只有真的长时间无任何后续才黄灯；user 继续输入则 kind=Working，直接不出灯。
-fn decide(p: &Parsed, mtime: SystemTime) -> Option<Chip> {
+fn decide(p: &Parsed, mtime: SystemTime, waiting_threshold: i64, running_grace: i64) -> Option<Chip> {
     let state = match p.kind {
         Kind::Done => "done",
         Kind::Error => "error",
         Kind::Working => return None,
-        // 在提问/等拍板 → 它根本走不了，立即黄灯，不走阈值。
         Kind::Asking => "waiting",
         Kind::ToolUse => {
-            if elapsed_secs(&p.last_ts) >= WAITING_THRESHOLD_SECS
-                && mtime_age_secs(mtime) >= RUNNING_GRACE_SECS
+            if elapsed_secs(&p.last_ts) >= waiting_threshold
+                && mtime_age_secs(mtime) >= running_grace
             {
                 "waiting"
             } else {
@@ -368,10 +364,16 @@ struct Entry {
     parsed: Option<Parsed>,
 }
 
-#[derive(Default)]
 struct Scanner {
     active: HashMap<PathBuf, Entry>,
     last_discovery: Option<Instant>,
+    settings: crate::config::SharedSettings,
+}
+
+impl Scanner {
+    fn new(settings: crate::config::SharedSettings) -> Self {
+        Self { active: HashMap::new(), last_discovery: None, settings }
+    }
 }
 
 /// Codex 只看「今天 + 昨天」两个日期目录，避免 walk 整棵 sessions 树。
@@ -435,6 +437,12 @@ impl Scanner {
             self.last_discovery = Some(Instant::now());
         }
 
+        // 每 tick 从设置读阈值（用户修改后立即生效）
+        let (wt, rg) = {
+            let s = self.settings.lock().unwrap();
+            (s.waiting_threshold_secs, s.running_grace_secs)
+        };
+
         let cutoff = SystemTime::now() - Duration::from_secs(ACTIVE_WINDOW_SECS);
         let mut chips = Vec::new();
         let mut remove = Vec::new();
@@ -457,7 +465,7 @@ impl Scanner {
                 e.mtime = mtime;
             }
             if let Some(p) = &e.parsed {
-                if let Some(c) = decide(p, mtime) {
+                if let Some(c) = decide(p, mtime, wt, rg) {
                     chips.push(c);
                 }
             }
@@ -505,8 +513,8 @@ fn notify(handle: &AppHandle, c: &Chip) {
 }
 
 /// 后台活动检测循环：扫描 → 过滤 dismiss → 检测新增弹 toast → emit。
-pub fn run(handle: AppHandle, shared: SharedActivity) {
-    let mut scanner = Scanner::default();
+pub fn run(handle: AppHandle, shared: SharedActivity, settings: crate::config::SharedSettings) {
+    let mut scanner = Scanner::new(settings.clone());
     let mut first = true;
     let mut prev: HashSet<String> = HashSet::new();
     loop {
@@ -522,9 +530,18 @@ pub fn run(handle: AppHandle, shared: SharedActivity) {
         };
 
         if !first {
+            let cfg = settings.lock().unwrap();
             for c in &visible {
                 if !prev.contains(&sig(c)) {
-                    notify(&handle, c);
+                    let should = match c.state.as_str() {
+                        "done" => cfg.toast_done,
+                        "waiting" => cfg.toast_waiting,
+                        "error" => cfg.toast_error,
+                        _ => false,
+                    };
+                    if should {
+                        notify(&handle, c);
+                    }
                 }
             }
         }
@@ -553,19 +570,19 @@ mod tests {
 
     #[test]
     fn done_shows() {
-        let c = decide(&parsed(Kind::Done, "2020-01-01T00:00:00Z"), SystemTime::now());
+        let c = decide(&parsed(Kind::Done, "2020-01-01T00:00:00Z"), SystemTime::now(), 180, 60);
         assert_eq!(c.unwrap().state, "done");
     }
 
     #[test]
     fn error_shows() {
-        let c = decide(&parsed(Kind::Error, "2020-01-01T00:00:00Z"), SystemTime::now());
+        let c = decide(&parsed(Kind::Error, "2020-01-01T00:00:00Z"), SystemTime::now(), 180, 60);
         assert_eq!(c.unwrap().state, "error");
     }
 
     #[test]
     fn working_hidden() {
-        let c = decide(&parsed(Kind::Working, "2020-01-01T00:00:00Z"), SystemTime::now());
+        let c = decide(&parsed(Kind::Working, "2020-01-01T00:00:00Z"), SystemTime::now(), 180, 60);
         assert!(c.is_none());
     }
 
@@ -573,32 +590,29 @@ mod tests {
     fn asking_is_immediate_waiting() {
         // 在提问（AskUserQuestion）→ 即使时间戳就是现在、文件刚写，也立即黄灯
         let now_ts = Utc::now().to_rfc3339();
-        let c = decide(&parsed(Kind::Asking, &now_ts), SystemTime::now());
+        let c = decide(&parsed(Kind::Asking, &now_ts), SystemTime::now(), 180, 60);
         assert_eq!(c.unwrap().state, "waiting");
     }
 
     #[test]
     fn tooluse_recent_not_waiting() {
-        // 工具刚 dispatch（时间戳就是现在）→ 未到阈值 → 不黄
         let now_ts = Utc::now().to_rfc3339();
-        let c = decide(&parsed(Kind::ToolUse, &now_ts), SystemTime::now());
+        let c = decide(&parsed(Kind::ToolUse, &now_ts), SystemTime::now(), 180, 60);
         assert!(c.is_none());
     }
 
     #[test]
     fn tooluse_stale_but_recent_write_not_waiting() {
-        // tool_use 条目很久前，但文件刚刚还在写（仍在跑）→ 不黄
         let old = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
-        let c = decide(&parsed(Kind::ToolUse, &old), SystemTime::now());
+        let c = decide(&parsed(Kind::ToolUse, &old), SystemTime::now(), 180, 60);
         assert!(c.is_none());
     }
 
     #[test]
     fn tooluse_stale_and_quiet_waiting() {
-        // tool_use 很久前 + 文件很久没写 → 真·等你 → 黄
         let old = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
         let quiet_mtime = SystemTime::now() - Duration::from_secs(120);
-        let c = decide(&parsed(Kind::ToolUse, &old), quiet_mtime);
+        let c = decide(&parsed(Kind::ToolUse, &old), quiet_mtime, 180, 60);
         assert_eq!(c.unwrap().state, "waiting");
     }
 }

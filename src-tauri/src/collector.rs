@@ -4,6 +4,7 @@
 //!     · 活跃（最近在烧 token）→ 每 ACTIVE_INTERVAL(100s) 刷一次，看着剩余往下掉；
 //!     · 空闲 → 不按表轮询，直接睡到下一个 reset 时间点再刷（响应里带 resetsAt，空闲时唯一会变的就是 reset）；
 //!     · 从空闲恢复 / 手动⟳ / 启动 → 立即刷。
+use crate::config::SharedSettings;
 use crate::state::Shared;
 use crate::{auth, quota, usage};
 use chrono::{DateTime, Utc};
@@ -11,13 +12,12 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 
-const TICK: Duration = Duration::from_secs(20); // 本地用量刷新 / 活动探测节奏
-const ACTIVE_INTERVAL: Duration = Duration::from_secs(100); // 活跃期额度刷新间隔
-const IDLE_AFTER: Duration = Duration::from_secs(300); // 多久没 token 增长算空闲
-const RESET_BUFFER: Duration = Duration::from_secs(15); // reset 后缓冲再刷，确保已跳变
-const IDLE_FALLBACK: Duration = Duration::from_secs(600); // 拿不到 reset 时间时的兜底心跳
+const TICK: Duration = Duration::from_secs(20);
+const ACTIVE_INTERVAL: Duration = Duration::from_secs(100);
+const RESET_BUFFER: Duration = Duration::from_secs(15);
+const IDLE_FALLBACK: Duration = Duration::from_secs(600);
 
-pub fn run(handle: AppHandle, shared: Shared, wake: Receiver<()>) {
+pub fn run(handle: AppHandle, shared: Shared, settings: SharedSettings, wake: Receiver<()>) {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -30,6 +30,7 @@ pub fn run(handle: AppHandle, shared: Shared, wake: Receiver<()>) {
     let mut was_active = true;
 
     loop {
+        let idle_after = Duration::from_secs(settings.lock().unwrap().idle_after_secs);
         let now = SystemTime::now();
         let do_quota = force || now >= next_quota_at;
         force = false;
@@ -42,7 +43,7 @@ pub fn run(handle: AppHandle, shared: Shared, wake: Receiver<()>) {
         if grew {
             last_active = Instant::now();
         }
-        let active = last_active.elapsed() < IDLE_AFTER;
+        let active = last_active.elapsed() < idle_after;
 
         if do_quota {
             // 刚拉过 → 根据活跃与否安排下次
@@ -110,7 +111,8 @@ fn schedule_next(shared: &Shared, active: bool, now: SystemTime) -> SystemTime {
     }
 }
 
-/// 刷新一次：本地用量必刷；额度按 do_quota。返回今日 token 总量（用于活动探测）。
+/// 刷新一次：本地用量必刷；额度按 do_quota（过期则跳过 API 调用）。
+/// 返回今日 token 总量（用于活动探测）。
 fn refresh(
     handle: &AppHandle,
     shared: &Shared,
@@ -125,17 +127,21 @@ fn refresh(
     let claude_usage = usage::scan_claude_today();
     let codex_usage = usage::scan_codex_today();
 
-    let claude_q = if do_quota {
+    // 预检：token 已过期则跳过 API 调用，避免白撞 401/限流。
+    let claude_expired = claude_creds.as_ref().map(|c| c.is_expired()).unwrap_or(false);
+    let codex_expired = codex_creds.as_ref().map(|c| c.is_expired()).unwrap_or(false);
+
+    let claude_q = if do_quota && !claude_expired {
         claude_creds.as_ref().map(|c| quota::fetch_claude(client, c))
     } else {
         None
     };
-    let codex_net = if do_quota {
+    let codex_net = if do_quota && !codex_expired {
         codex_creds.as_ref().map(|c| quota::fetch_codex(client, c))
     } else {
         None
     };
-    let codex_cache = if do_quota { quota::read_codex_cache() } else { None };
+    let codex_cache = if do_quota && !codex_expired { quota::read_codex_cache() } else { None };
 
     // ---- 单次持锁写回 ----
     let (snapshot, total) = {
@@ -150,6 +156,11 @@ fn refresh(
         }
         if claude_creds.is_none() {
             st.claude.logged_in = false;
+        }
+        // token 过期：保留上次额度，标 stale + 友好提示，不发 API
+        if do_quota && claude_expired {
+            st.claude.stale = true;
+            st.claude.error = Some("令牌已过期，请重新运行 claude".into());
         }
         if let Some(res) = claude_q {
             match res {
@@ -185,7 +196,11 @@ fn refresh(
         if codex_creds.is_none() {
             st.codex.logged_in = false;
         }
-        if do_quota && codex_creds.is_some() {
+        if do_quota && codex_expired {
+            st.codex.stale = true;
+            st.codex.error = Some("令牌已过期，请重新运行 codex".into());
+        }
+        if do_quota && codex_creds.is_some() && !codex_expired {
             let mut applied = false;
             if let Some(Ok(r)) = &codex_net {
                 if r.logged_in && (r.five_hour.is_some() || r.seven_day.is_some()) {

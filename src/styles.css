@@ -98,13 +98,17 @@ body {
   color: var(--codex);
 }
 .sync {
+  position: absolute;
+  top: 5px;
+  right: 20px;
+  z-index: 4;
   font-size: 8px;
   color: var(--muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 1px 2px;
+  padding: 1px 3px;
   border-radius: 4px;
   transition: color 0.15s, background 0.15s;
 }

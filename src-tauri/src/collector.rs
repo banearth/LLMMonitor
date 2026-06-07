@@ -127,11 +127,12 @@ fn refresh(
     let claude_usage = usage::scan_claude_today();
     let codex_usage = usage::scan_codex_today();
 
-    // 预检：token 已过期则跳过 API 调用，避免白撞 401/限流。
-    let claude_expired = claude_creds.as_ref().map(|c| c.is_expired()).unwrap_or(false);
+    // Codex JWT 过期预检（Codex 无 refresh token，过期即失效）。
+    // Claude 使用 OAuth refresh token 透明续期，expiresAt 过期不代表真的需要重新登录，
+    // 直接调 API，用 401 响应来判断是否真的失效，避免误报。
     let codex_expired = codex_creds.as_ref().map(|c| c.is_expired()).unwrap_or(false);
 
-    let claude_q = if do_quota && !claude_expired {
+    let claude_q = if do_quota {
         claude_creds.as_ref().map(|c| quota::fetch_claude(client, c))
     } else {
         None
@@ -156,11 +157,6 @@ fn refresh(
         }
         if claude_creds.is_none() {
             st.claude.logged_in = false;
-        }
-        // token 过期：保留上次额度，标 stale + 友好提示，不发 API
-        if do_quota && claude_expired {
-            st.claude.stale = true;
-            st.claude.error = Some("令牌已过期，请重新运行 claude".into());
         }
         if let Some(res) = claude_q {
             match res {

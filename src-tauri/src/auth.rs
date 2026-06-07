@@ -23,18 +23,8 @@ pub struct ClaudeCreds {
     pub access_token: String,
     #[allow(dead_code)]
     pub refresh_token: Option<String>,
-    /// 过期时间（unix 毫秒）。
-    pub expires_at: Option<i64>,
 }
 
-impl ClaudeCreds {
-    /// token 是否已过期（expiresAt 是毫秒时间戳）。未知则视为未过期。
-    pub fn is_expired(&self) -> bool {
-        self.expires_at
-            .map(|ms| ms < chrono::Utc::now().timestamp_millis())
-            .unwrap_or(false)
-    }
-}
 
 /// 返回值含义：
 /// - `Ok(None)`  → 本机未安装 / 未登录（无凭证文件或无 token）
@@ -51,7 +41,6 @@ pub fn read_claude() -> Option<ClaudeCreds> {
     Some(ClaudeCreds {
         access_token: access,
         refresh_token: o.get("refreshToken").and_then(|x| x.as_str()).map(String::from),
-        expires_at: o.get("expiresAt").and_then(|x| x.as_i64()),
     })
 }
 

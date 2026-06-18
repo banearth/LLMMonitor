@@ -20,6 +20,8 @@ pub struct Settings {
     // ── 外观 ─────────────────────────────────────────────────────
     /// 主窗口透明度，0.3–1.0。
     pub opacity: f64,
+    pub main_window_x: Option<i32>,
+    pub main_window_y: Option<i32>,
     // ── 额度轮询 ──────────────────────────────────────────────────
     /// 多久没有 token 增长算空闲（秒）。
     pub idle_after_secs: u64,
@@ -37,6 +39,8 @@ impl Default for Settings {
             waiting_threshold_secs: 180,
             running_grace_secs: 60,
             opacity: 1.0,
+            main_window_x: None,
+            main_window_y: None,
             idle_after_secs: 300,
             auto_start: false,
         }

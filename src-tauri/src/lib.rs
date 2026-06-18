@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WindowEvent,
+    Emitter, Manager, PhysicalPosition, WindowEvent,
 };
 
 // ── 命令 ──────────────────────────────────────────────────────────────
@@ -165,6 +165,17 @@ pub fn run() {
                 }
             }
 
+            if let Some(w) = app.get_webview_window("main") {
+                let pos = {
+                    let s = app.state::<SharedSettings>();
+                    let g = s.lock().unwrap();
+                    g.main_window_x.zip(g.main_window_y)
+                };
+                if let Some((x, y)) = pos {
+                    let _ = w.set_position(PhysicalPosition::new(x, y));
+                }
+            }
+
             // 系统托盘
             let auto_on = app.state::<SharedSettings>().lock().unwrap().auto_start;
             let item_toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
@@ -230,11 +241,20 @@ pub fn run() {
             Ok(())
         })
         // 关闭按钮：主窗口 → 隐藏到托盘；设置窗口 → 隐藏（保留状态）
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::Moved(pos) if window.label() == "main" => {
+                if let Some(settings) = window.try_state::<SharedSettings>() {
+                    let mut guard = settings.lock().unwrap();
+                    guard.main_window_x = Some(pos.x);
+                    guard.main_window_y = Some(pos.y);
+                    config::save(&guard);
+                }
+            }
+            WindowEvent::CloseRequested { api, .. } => {
                 let _ = window.hide();
                 api.prevent_close();
             }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

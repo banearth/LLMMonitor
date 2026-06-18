@@ -136,7 +136,7 @@ fn read_codex_title_map() -> Option<HashMap<String, String>> {
         .join(".codex")
         .join("llmmonitor-session-titles.json");
     let txt = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<HashMap<String, String>>(&txt).ok()
+    serde_json::from_str::<HashMap<String, String>>(txt.trim_start_matches('\u{feff}')).ok()
 }
 
 fn codex_title_map_mtime() -> Option<SystemTime> {
@@ -144,6 +144,28 @@ fn codex_title_map_mtime() -> Option<SystemTime> {
         .join(".codex")
         .join("llmmonitor-session-titles.json");
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn read_claude_title_map() -> Option<HashMap<String, String>> {
+    let path = dirs::home_dir()?
+        .join(".claude")
+        .join("llmmonitor-session-titles.json");
+    let txt = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<HashMap<String, String>>(txt.trim_start_matches('\u{feff}')).ok()
+}
+
+fn claude_title_map_mtime() -> Option<SystemTime> {
+    let path = dirs::home_dir()?
+        .join(".claude")
+        .join("llmmonitor-session-titles.json");
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn claude_title_override(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    read_claude_title_map()?
+        .get(&stem)
+        .and_then(|title| clean_title(title))
 }
 
 fn codex_title_override(path: &Path) -> Option<String> {
@@ -304,7 +326,8 @@ fn parse_claude(path: &Path) -> Option<Parsed> {
         .as_deref()
         .map(basename)
         .unwrap_or_else(|| folder_fallback(path));
-    let project = ai_title
+    let project = claude_title_override(path)
+        .or(ai_title)
         .or_else(|| head_find(path, "aiTitle"))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| folder.clone());
@@ -426,6 +449,7 @@ struct Scanner {
     active: HashMap<PathBuf, Entry>,
     last_discovery: Option<Instant>,
     codex_title_mtime: Option<Option<SystemTime>>,
+    claude_title_mtime: Option<Option<SystemTime>>,
     settings: crate::config::SharedSettings,
 }
 
@@ -435,6 +459,7 @@ impl Scanner {
             active: HashMap::new(),
             last_discovery: None,
             codex_title_mtime: None,
+            claude_title_mtime: None,
             settings,
         }
     }
@@ -446,6 +471,16 @@ impl Scanner {
             .map(|previous| previous != current)
             .unwrap_or(false);
         self.codex_title_mtime = Some(current);
+        changed
+    }
+
+    fn claude_titles_changed(&mut self) -> bool {
+        let current = claude_title_map_mtime();
+        let changed = self
+            .claude_title_mtime
+            .map(|previous| previous != current)
+            .unwrap_or(false);
+        self.claude_title_mtime = Some(current);
         changed
     }
 }
@@ -525,6 +560,7 @@ impl Scanner {
             )
         };
         let codex_titles_changed = self.codex_titles_changed();
+        let claude_titles_changed = self.claude_titles_changed();
 
         let cutoff = SystemTime::now() - Duration::from_secs(ACTIVE_WINDOW_SECS);
         let mut chips = Vec::new();
@@ -543,7 +579,10 @@ impl Scanner {
                 remove.push(path.clone()); // 不再活跃
                 continue;
             }
-            if mtime != e.mtime || (matches!(e.src, Src::Codex) && codex_titles_changed) {
+            if mtime != e.mtime
+                || (matches!(e.src, Src::Codex) && codex_titles_changed)
+                || (matches!(e.src, Src::Claude) && claude_titles_changed)
+            {
                 e.parsed = parse_file(e.src, path); // 仅在文件确有变化时才读
                 e.mtime = mtime;
             }

@@ -167,12 +167,22 @@ pub fn run() {
 
             // 系统托盘
             let auto_on = app.state::<SharedSettings>().lock().unwrap().auto_start;
-            let item_toggle  = MenuItem::with_id(app, "toggle",   "显示 / 隐藏", true, None::<&str>)?;
-            let item_settings= MenuItem::with_id(app, "settings", "设置",        true, None::<&str>)?;
-            let item_auto    = CheckMenuItem::with_id(app, "autostart", "开机自启", true, auto_on, None::<&str>)?;
-            let item_refresh = MenuItem::with_id(app, "refresh",  "立即刷新",     true, None::<&str>)?;
-            let item_quit    = MenuItem::with_id(app, "quit",     "退出",         true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&item_toggle, &item_settings, &item_auto, &item_refresh, &item_quit])?;
+            let item_toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
+            let item_settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+            let item_auto =
+                CheckMenuItem::with_id(app, "autostart", "开机自启", true, auto_on, None::<&str>)?;
+            let item_refresh = MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?;
+            let item_quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &item_toggle,
+                    &item_settings,
+                    &item_auto,
+                    &item_refresh,
+                    &item_quit,
+                ],
+            )?;
 
             let auto_item = item_auto.clone();
             let mut tray = TrayIconBuilder::new()
@@ -180,9 +190,9 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "toggle"   => toggle_window(app),
+                    "toggle" => toggle_window(app),
                     "settings" => open_settings(app),
-                    "refresh"  => {
+                    "refresh" => {
                         if let Some(tx) = app.try_state::<RefreshTx>() {
                             let _ = tx.0.lock().unwrap().send(());
                         }

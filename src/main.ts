@@ -3,15 +3,15 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 const WIN_W = 190;
+const MAX_VISIBLE = 5;
 
-// 禁用 WebView 默认右键菜单（返回/刷新/另存为/打印），桌面小窗不该有
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 
-// ===== 与 Rust 端 state.rs 对齐的类型 =====
 interface Win {
-  remaining: number; // 0..100
+  remaining: number;
   resetsAt: string | null;
 }
+
 interface Provider {
   present: boolean;
   loggedIn: boolean;
@@ -22,21 +22,40 @@ interface Provider {
   stale: boolean;
   error: string | null;
 }
+
 interface AppState {
   claude: Provider;
   codex: Provider;
   lastSync: string | null;
 }
 
-// ===== 格式化工具 =====
+interface Chip {
+  id: string;
+  tool: string;
+  project: string;
+  folder: string;
+  state: string;
+  since: string;
+  trigger: string;
+}
+
+function $(id: string): HTMLElement | null {
+  return document.getElementById(id);
+}
+
+function setText(id: string, text: string) {
+  const el = $(id);
+  if (el) el.textContent = text;
+}
+
 function fmtPct(n: number): string {
   return Math.round(n).toString();
 }
 
 function fmtTokens(n: number | null): string {
   if (n == null) return "--";
-  if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
-  if (n >= 1e4) return (n / 1e4).toFixed(1) + "万";
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + "e8";
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + "w";
   return n.toString();
 }
 
@@ -49,15 +68,13 @@ function pad(n: number): string {
   return n.toString().padStart(2, "0");
 }
 
-/** 5h 重置：始终 "重置 HH:MM" */
 function fmtResetShort(iso: string | null): string {
-  if (!iso) return "重置 --:--";
+  if (!iso) return "reset --:--";
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return "重置 --:--";
-  return `重置 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (isNaN(d.getTime())) return "reset --:--";
+  return `reset ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 7d 重置：今天显示 HH:MM，跨天显示 M/D HH:MM */
 function fmtResetDate(iso: string | null): string {
   if (!iso) return "--";
   const d = new Date(iso);
@@ -79,12 +96,13 @@ function fmtSync(iso: string | null): string {
 }
 
 let spinTimer: number | undefined;
+
 function startSpin() {
   $("sync-ico")?.classList.add("spinning");
   if (spinTimer) clearTimeout(spinTimer);
-  // 安全兜底：最多转 5 秒，避免刷新失败时一直转。
   spinTimer = window.setTimeout(stopSpin, 5000);
 }
+
 function stopSpin() {
   $("sync-ico")?.classList.remove("spinning");
   if (spinTimer) {
@@ -99,51 +117,37 @@ function barClass(remaining: number): string {
   return "ok";
 }
 
-function $(id: string): HTMLElement | null {
-  return document.getElementById(id);
-}
-
-/** 应用窗口不透明度（作用在卡片与信号条上）。 */
 function applyOpacity(o: number) {
   const v = Math.max(0.3, Math.min(1, o || 1));
   const root = document.getElementById("root");
   if (root) root.style.opacity = String(v);
 }
 
-function setText(id: string, text: string) {
-  const el = $(id);
-  if (el) el.textContent = text;
-}
-
-// ===== 渲染单个厂商区块 =====
 function renderProvider(key: "claude" | "codex", p: Provider) {
   const zone = $(`zone-${key}`);
   if (!zone) return;
 
-  // 未检测到该工具 → 隐藏整区
   if (!p.present) {
     zone.classList.add("hidden");
     return;
   }
+
   zone.classList.remove("hidden");
   zone.classList.toggle("stale", p.stale);
 
   const note = $(`${key}-note`);
-
-  // 未登录 → 提示，% 置 --
   if (!p.loggedIn) {
     setText(`${key}-pct`, "--");
     const bar = $(`${key}-bar`);
     if (bar) bar.style.width = "0%";
-    setText(`${key}-5h`, "重置 --:--");
-    setText(`${key}-7d`, "-- · --");
-    if (note) note.textContent = p.error ?? "未登录";
+    setText(`${key}-5h`, "reset --:--");
+    setText(`${key}-7d`, "-- - --");
+    if (note) note.textContent = p.error ?? "not logged in";
     return;
   }
 
-  if (note) note.textContent = p.stale ? p.error ?? "同步失败" : "";
+  if (note) note.textContent = p.stale ? p.error ?? "sync failed" : "";
 
-  // 5h 作为主显示
   const five = p.fiveHour;
   if (five) {
     setText(`${key}-pct`, fmtPct(five.remaining));
@@ -155,14 +159,12 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
     setText(`${key}-5h`, fmtResetShort(five.resetsAt));
   }
 
-  // 7d
   const seven = p.sevenDay;
   if (seven) {
-    setText(`${key}-7d`, `${fmtPct(seven.remaining)}%　${fmtResetDate(seven.resetsAt)}`);
+    setText(`${key}-7d`, `${fmtPct(seven.remaining)}% - ${fmtResetDate(seven.resetsAt)}`);
   }
 }
 
-// ===== 渲染整体 =====
 function render(state: AppState) {
   renderProvider("claude", state.claude);
   renderProvider("codex", state.codex);
@@ -171,46 +173,30 @@ function render(state: AppState) {
   const sync = $("sync");
   if (sync) sync.classList.toggle("warn", state.claude.stale || state.codex.stale);
 
-  // 每家各自的今日 token / API 等价花费（本地日志统计），放在各自区内。
   setTodayLine("claude-today", state.claude);
   setTodayLine("codex-today", state.codex);
 
-  // 只有两区都在时才显示中间分隔线；隐藏某区后重算窗口高度，避免留空白。
   const divider = document.querySelector(".divider") as HTMLElement | null;
   if (divider) {
-    divider.style.display =
-      state.claude.present && state.codex.present ? "" : "none";
+    divider.style.display = state.claude.present && state.codex.present ? "" : "none";
   }
-  resizeWindow();
 
-  // 数据已更新 → 停止刷新转圈。
+  resizeWindow();
   stopSpin();
 }
 
 function setTodayLine(id: string, p: Provider) {
   const el = $(id);
   if (!el) return;
-  el.innerHTML = `<span class="amt">${fmtCost(p.todayCost)}</span> · <span class="amt">${fmtTokens(p.todayTokens)}</span> tok`;
+  el.innerHTML = `<span class="amt">${fmtCost(p.todayCost)}</span> - <span class="amt">${fmtTokens(p.todayTokens)}</span> tok`;
 }
-
-// ===== 信号隧道 =====
-interface Chip {
-  id: string;
-  tool: string; // claude | codex
-  project: string;
-  folder: string;
-  state: string; // done | waiting | error
-  since: string;
-  trigger: string;
-}
-
-const MAX_VISIBLE = 5; // 最多叠 5 条，多了暂不显示
 
 function stateLabel(s: string): string {
-  return s === "done" ? "完成" : s === "waiting" ? "等你处理" : "出错/中断";
+  if (s === "done") return "done";
+  if (s === "waiting") return "waiting";
+  return "error";
 }
 
-/** 把窗口高度收紧到内容（卡片 + 信号条），条增减时窗口随之变高/变矮。 */
 function resizeWindow() {
   requestAnimationFrame(() => {
     const root = document.getElementById("root");
@@ -222,7 +208,6 @@ function resizeWindow() {
   });
 }
 
-/** 点击该条 → 淡出 → 通知后端 dismiss。 */
 function attachClick(el: HTMLElement, c: Chip) {
   el.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -245,6 +230,7 @@ function renderChips(chips: Chip[]) {
     resizeWindow();
     return;
   }
+
   stack.classList.remove("empty");
   root?.classList.add("has-bars");
 
@@ -253,35 +239,38 @@ function renderChips(chips: Chip[]) {
     el.className = `sigbar ${c.state}`;
     const toolName = c.tool === "claude" ? "Claude" : "Codex";
     const parts = [toolName];
-    if (c.folder && c.folder !== c.project) parts.push(c.folder); // 仓库名（与标题不同才加，避免重复）
+    if (c.folder && c.folder !== c.project) parts.push(c.folder);
     parts.push(c.project, stateLabel(c.state));
-    el.title = parts.join(" · ");
+    el.title = parts.join(" - ");
+
     const ico = document.createElement("span");
     ico.className = `tico ${c.tool}`;
-    ico.textContent = c.tool === "claude" ? "✷" : "◎";
+    ico.textContent = c.tool === "claude" ? "C" : "X";
+
     const txt = document.createElement("span");
     txt.className = "ptxt";
     txt.textContent = c.project;
+
     const st = document.createElement("span");
     st.className = "st";
     st.textContent = stateLabel(c.state);
+
     el.appendChild(ico);
     el.appendChild(txt);
     el.appendChild(st);
     attachClick(el, c);
     stack.appendChild(el);
   }
+
   resizeWindow();
 }
 
-// ===== 启动 =====
 window.addEventListener("DOMContentLoaded", async () => {
   $("close")?.addEventListener("click", (e) => {
     e.stopPropagation();
     getCurrentWindow().close();
   });
 
-  // ⟳ 立即刷新：阻止拖拽、转圈、通知后台马上同步一次。
   const syncEl = $("sync");
   syncEl?.addEventListener("mousedown", (e) => e.stopPropagation());
   syncEl?.addEventListener("click", async (e) => {
@@ -298,25 +287,24 @@ window.addEventListener("DOMContentLoaded", async () => {
   await listen<Chip[]>("chips-updated", (e) => renderChips(e.payload));
   await listen<number>("apply-opacity", (e) => applyOpacity(e.payload));
 
-  // 启动时读设置应用透明度
   try {
     const s = await invoke<{ opacity: number }>("get_settings");
     applyOpacity(s.opacity);
   } catch (_) {
-    /* 用默认不透明 */
+    /* keep default opacity */
   }
 
-  // 首帧兜底：主动拉一次
   try {
     const s = await invoke<AppState>("get_state");
     render(s);
   } catch (_) {
-    /* 后台线程稍后会推送 */
+    /* collector will emit later */
   }
+
   try {
     const chips = await invoke<Chip[]>("get_chips");
     renderChips(chips);
   } catch (_) {
-    /* 后台线程稍后会推送 */
+    /* collector will emit later */
   }
 });

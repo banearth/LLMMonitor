@@ -80,10 +80,9 @@ pub fn set_autostart(enable: bool) {
             RegKey,
         };
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(run) = hkcu.open_subkey_with_flags(
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            KEY_WRITE,
-        ) {
+        if let Ok(run) =
+            hkcu.open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Run", KEY_WRITE)
+        {
             if enable {
                 if let Ok(exe) = std::env::current_exe() {
                     let _ = run.set_value("LLMMonitor", &exe.to_string_lossy().as_ref());
@@ -101,9 +100,7 @@ pub fn is_autostart_enabled() -> bool {
     {
         use winreg::{enums::HKEY_CURRENT_USER, RegKey};
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(run) =
-            hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
-        {
+        if let Ok(run) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run") {
             return run.get_value::<String, _>("LLMMonitor").is_ok();
         }
     }

@@ -27,7 +27,7 @@ const ACTIVE_WINDOW_SECS: u64 = 15 * 60; // 只跟踪近 15 分钟改动过的�
 const TICK: Duration = Duration::from_secs(4); // 检测节奏（廉价 stat + 状态更新）
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30); // 全量 walk 发现新活跃文件的间隔
 const TAIL_BYTES: u64 = 96 * 1024; // 只读文件尾部
-// 注：waiting 阈值（默认 180s）/ 仍在跑宽限（默认 60s）现由用户设置提供，见 config.rs。
+                                   // 注：waiting 阈值（默认 180s）/ 仍在跑宽限（默认 60s）现由用户设置提供，见 config.rs。
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +116,52 @@ fn head_find(path: &Path, key: &str) -> Option<String> {
 
 fn cwd_from_head(path: &Path) -> Option<String> {
     head_find(path, "cwd")
+}
+
+fn codex_session_id_from_head(path: &Path) -> Option<String> {
+    head_find(path, "id")
+}
+
+fn clean_title(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn read_codex_title_map() -> Option<HashMap<String, String>> {
+    let path = dirs::home_dir()?
+        .join(".codex")
+        .join("llmmonitor-session-titles.json");
+    let txt = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<HashMap<String, String>>(&txt).ok()
+}
+
+fn codex_title_map_mtime() -> Option<SystemTime> {
+    let path = dirs::home_dir()?
+        .join(".codex")
+        .join("llmmonitor-session-titles.json");
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn codex_title_override(path: &Path) -> Option<String> {
+    let titles = read_codex_title_map()?;
+    codex_title_from_map(path, &titles)
+}
+
+fn codex_title_from_map(path: &Path, titles: &HashMap<String, String>) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    if let Some(title) = codex_session_id_from_head(path)
+        .as_deref()
+        .and_then(|id| titles.get(id))
+        .and_then(|title| clean_title(title))
+    {
+        return Some(title);
+    }
+
+    titles.get(&stem).and_then(|title| clean_title(title))
 }
 
 fn folder_fallback(path: &Path) -> String {
@@ -313,11 +359,12 @@ fn parse_codex(path: &Path) -> Option<Parsed> {
         .as_deref()
         .map(basename)
         .unwrap_or_else(|| "codex".into());
+    let project = codex_title_override(path).unwrap_or_else(|| folder.clone());
     let id = path.file_stem()?.to_string_lossy().to_string();
     Some(Parsed {
         id,
         tool: "codex",
-        project: folder.clone(),
+        project,
         folder,
         kind,
         last_ts,
@@ -378,12 +425,28 @@ struct Entry {
 struct Scanner {
     active: HashMap<PathBuf, Entry>,
     last_discovery: Option<Instant>,
+    codex_title_mtime: Option<Option<SystemTime>>,
     settings: crate::config::SharedSettings,
 }
 
 impl Scanner {
     fn new(settings: crate::config::SharedSettings) -> Self {
-        Self { active: HashMap::new(), last_discovery: None, settings }
+        Self {
+            active: HashMap::new(),
+            last_discovery: None,
+            codex_title_mtime: None,
+            settings,
+        }
+    }
+
+    fn codex_titles_changed(&mut self) -> bool {
+        let current = codex_title_map_mtime();
+        let changed = self
+            .codex_title_mtime
+            .map(|previous| previous != current)
+            .unwrap_or(false);
+        self.codex_title_mtime = Some(current);
+        changed
     }
 }
 
@@ -430,7 +493,11 @@ impl Scanner {
             }
         };
 
-        add(&home.join(".claude").join("projects"), Src::Claude, &mut self.active);
+        add(
+            &home.join(".claude").join("projects"),
+            Src::Claude,
+            &mut self.active,
+        );
         let sroot = home.join(".codex").join("sessions");
         for d in codex_date_dirs(&sroot) {
             add(&d, Src::Codex, &mut self.active);
@@ -451,8 +518,13 @@ impl Scanner {
         // 每 tick 从设置读阈值/开关（用户修改后立即生效）
         let (stall, wt, rg) = {
             let s = self.settings.lock().unwrap();
-            (s.stall_to_waiting, s.waiting_threshold_secs, s.running_grace_secs)
+            (
+                s.stall_to_waiting,
+                s.waiting_threshold_secs,
+                s.running_grace_secs,
+            )
         };
+        let codex_titles_changed = self.codex_titles_changed();
 
         let cutoff = SystemTime::now() - Duration::from_secs(ACTIVE_WINDOW_SECS);
         let mut chips = Vec::new();
@@ -471,7 +543,7 @@ impl Scanner {
                 remove.push(path.clone()); // 不再活跃
                 continue;
             }
-            if mtime != e.mtime {
+            if mtime != e.mtime || (matches!(e.src, Src::Codex) && codex_titles_changed) {
                 e.parsed = parse_file(e.src, path); // 仅在文件确有变化时才读
                 e.mtime = mtime;
             }
@@ -486,7 +558,11 @@ impl Scanner {
         }
 
         // 待办(error/waiting)靠左固定、不被裁；done 排其后；同级按时间早→晚
-        chips.sort_by(|a, b| prio(&b.state).cmp(&prio(&a.state)).then(a.since.cmp(&b.since)));
+        chips.sort_by(|a, b| {
+            prio(&b.state)
+                .cmp(&prio(&a.state))
+                .then(a.since.cmp(&b.since))
+        });
         chips
     }
 }
@@ -513,7 +589,12 @@ pub fn visible_chips(activity: &SharedActivity) -> Vec<Chip> {
     let dismissed = &st.dismissed;
     st.chips
         .iter()
-        .filter(|c| dismissed.get(&c.id).map(|d| d != &c.trigger).unwrap_or(true))
+        .filter(|c| {
+            dismissed
+                .get(&c.id)
+                .map(|d| d != &c.trigger)
+                .unwrap_or(true)
+        })
         .cloned()
         .collect()
 }
@@ -541,7 +622,11 @@ fn notify(handle: &AppHandle, c: &Chip) {
         "error" => ("⚠️", "出错/中断"),
         _ => ("", ""),
     };
-    let tool = if c.tool == "claude" { "Claude" } else { "Codex" };
+    let tool = if c.tool == "claude" {
+        "Claude"
+    } else {
+        "Codex"
+    };
     let _ = handle
         .notification()
         .builder()
@@ -578,7 +663,12 @@ pub fn run(handle: AppHandle, shared: SharedActivity, settings: crate::config::S
             }
             let visible = computed
                 .iter()
-                .filter(|c| st.dismissed.get(&c.id).map(|d| d != &c.trigger).unwrap_or(true))
+                .filter(|c| {
+                    st.dismissed
+                        .get(&c.id)
+                        .map(|d| d != &c.trigger)
+                        .unwrap_or(true)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             st.chips = computed;
@@ -604,6 +694,21 @@ pub fn run(handle: AppHandle, shared: SharedActivity, settings: crate::config::S
 mod tests {
     use super::*;
 
+    fn temp_rollout(name: &str, session_id: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "llmmonitor-test-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let line = format!(
+            r#"{{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{{"id":"{session_id}","cwd":"C:\\repo\\Client"}}}}"#
+        );
+        std::fs::write(&path, line).unwrap();
+        path
+    }
+
     fn parsed(kind: Kind, ts: &str) -> Parsed {
         Parsed {
             id: "x".into(),
@@ -617,19 +722,37 @@ mod tests {
 
     #[test]
     fn done_shows() {
-        let c = decide(&parsed(Kind::Done, "2020-01-01T00:00:00Z"), SystemTime::now(), true, 180, 60);
+        let c = decide(
+            &parsed(Kind::Done, "2020-01-01T00:00:00Z"),
+            SystemTime::now(),
+            true,
+            180,
+            60,
+        );
         assert_eq!(c.unwrap().state, "done");
     }
 
     #[test]
     fn error_shows() {
-        let c = decide(&parsed(Kind::Error, "2020-01-01T00:00:00Z"), SystemTime::now(), true, 180, 60);
+        let c = decide(
+            &parsed(Kind::Error, "2020-01-01T00:00:00Z"),
+            SystemTime::now(),
+            true,
+            180,
+            60,
+        );
         assert_eq!(c.unwrap().state, "error");
     }
 
     #[test]
     fn working_hidden() {
-        let c = decide(&parsed(Kind::Working, "2020-01-01T00:00:00Z"), SystemTime::now(), true, 180, 60);
+        let c = decide(
+            &parsed(Kind::Working, "2020-01-01T00:00:00Z"),
+            SystemTime::now(),
+            true,
+            180,
+            60,
+        );
         assert!(c.is_none());
     }
 
@@ -637,21 +760,65 @@ mod tests {
     fn asking_is_immediate_waiting() {
         // 在提问（AskUserQuestion）→ 即使时间戳就是现在、文件刚写，也立即黄灯
         let now_ts = Utc::now().to_rfc3339();
-        let c = decide(&parsed(Kind::Asking, &now_ts), SystemTime::now(), true, 180, 60);
+        let c = decide(
+            &parsed(Kind::Asking, &now_ts),
+            SystemTime::now(),
+            true,
+            180,
+            60,
+        );
         assert_eq!(c.unwrap().state, "waiting");
+    }
+
+    #[test]
+    fn codex_title_map_prefers_session_id_then_rollout_stem() {
+        let path = temp_rollout("rollout-test.jsonl", "session-1");
+        let mut titles = HashMap::new();
+        titles.insert("rollout-test".to_string(), "Stem Title".to_string());
+        titles.insert("session-1".to_string(), "Session Title".to_string());
+        assert_eq!(
+            codex_title_from_map(&path, &titles).as_deref(),
+            Some("Session Title")
+        );
+
+        titles.remove("session-1");
+        assert_eq!(
+            codex_title_from_map(&path, &titles).as_deref(),
+            Some("Stem Title")
+        );
+
+        titles.insert("session-1".to_string(), "   ".to_string());
+        assert_eq!(
+            codex_title_from_map(&path, &titles).as_deref(),
+            Some("Stem Title")
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn tooluse_recent_not_waiting() {
         let now_ts = Utc::now().to_rfc3339();
-        let c = decide(&parsed(Kind::ToolUse, &now_ts), SystemTime::now(), true, 180, 60);
+        let c = decide(
+            &parsed(Kind::ToolUse, &now_ts),
+            SystemTime::now(),
+            true,
+            180,
+            60,
+        );
         assert!(c.is_none());
     }
 
     #[test]
     fn tooluse_stale_but_recent_write_not_waiting() {
         let old = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
-        let c = decide(&parsed(Kind::ToolUse, &old), SystemTime::now(), true, 180, 60);
+        let c = decide(
+            &parsed(Kind::ToolUse, &old),
+            SystemTime::now(),
+            true,
+            180,
+            60,
+        );
         assert!(c.is_none());
     }
 

@@ -8,7 +8,24 @@ use serde_json::Value;
 
 /// Claude Code 用的固定 UA —— 缺它会撞激进的 429 限流桶。
 const CLAUDE_UA: &str = "claude-code/2.0.0 (external, cli)";
-const CODEX_UA: &str = "codex_cli_rs/0.1.0";
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_ORIGINATOR: &str = "codex_cli_rs";
+
+fn codex_user_agent() -> String {
+    let version_path = dirs::home_dir().map(|h| h.join(".codex").join("version.json"));
+    let version = version_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|txt| serde_json::from_str::<Value>(&txt).ok())
+        .and_then(|v| {
+            v.get("latest_version")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "0.140.0".to_string());
+
+    format!("{CODEX_ORIGINATOR}/{version}")
+}
 
 /// 抓取结果。`logged_in=false` 表示 token 失效（401）。
 pub struct QuotaResult {
@@ -31,7 +48,10 @@ fn epoch_to_iso(secs: i64) -> Option<String> {
 
 // ─────────────────────────── Claude ───────────────────────────
 
-pub fn fetch_claude(client: &reqwest::blocking::Client, creds: &ClaudeCreds) -> Result<QuotaResult> {
+pub fn fetch_claude(
+    client: &reqwest::blocking::Client,
+    creds: &ClaudeCreds,
+) -> Result<QuotaResult> {
     let resp = client
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {}", creds.access_token))
@@ -63,7 +83,10 @@ pub fn fetch_claude(client: &reqwest::blocking::Client, creds: &ClaudeCreds) -> 
         let util = o.get("utilization").and_then(|x| x.as_f64())?;
         Some(Window {
             remaining: remaining_from_util(util),
-            resets_at: o.get("resets_at").and_then(|x| x.as_str()).map(String::from),
+            resets_at: o
+                .get("resets_at")
+                .and_then(|x| x.as_str())
+                .map(String::from),
         })
     };
 
@@ -78,12 +101,13 @@ pub fn fetch_claude(client: &reqwest::blocking::Client, creds: &ClaudeCreds) -> 
 
 pub fn fetch_codex(client: &reqwest::blocking::Client, creds: &CodexCreds) -> Result<QuotaResult> {
     let mut req = client
-        .get("https://chatgpt.com/backend-api/codex/usage")
+        .get(CODEX_USAGE_URL)
         .header("Authorization", format!("Bearer {}", creds.access_token))
-        .header("User-Agent", CODEX_UA)
+        .header("User-Agent", codex_user_agent())
+        .header("originator", CODEX_ORIGINATOR)
         .header("Content-Type", "application/json");
     if let Some(acct) = &creds.account_id {
-        req = req.header("chatgpt-account-id", acct.clone());
+        req = req.header("ChatGPT-Account-Id", acct.clone());
     }
 
     let resp = req.send()?;
@@ -96,7 +120,7 @@ pub fn fetch_codex(client: &reqwest::blocking::Client, creds: &CodexCreds) -> Re
         });
     }
     if !status.is_success() {
-        return Err(anyhow!("Codex usage HTTP {}", status.as_u16()));
+        return Err(anyhow!("{CODEX_USAGE_URL} HTTP {}", status.as_u16()));
     }
 
     let v: Value = resp.json()?;

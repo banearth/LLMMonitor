@@ -25,7 +25,6 @@ pub struct ClaudeCreds {
     pub refresh_token: Option<String>,
 }
 
-
 /// 返回值含义：
 /// - `Ok(None)`  → 本机未安装 / 未登录（无凭证文件或无 token）
 /// - `Ok(Some)`  → 读到凭证
@@ -40,15 +39,16 @@ pub fn read_claude() -> Option<ClaudeCreds> {
     }
     Some(ClaudeCreds {
         access_token: access,
-        refresh_token: o.get("refreshToken").and_then(|x| x.as_str()).map(String::from),
+        refresh_token: o
+            .get("refreshToken")
+            .and_then(|x| x.as_str())
+            .map(String::from),
     })
 }
 
 /// 是否存在 `~/.claude` 目录（判断该工具是否被使用过）。
 pub fn claude_present() -> bool {
-    home()
-        .map(|h| h.join(".claude").exists())
-        .unwrap_or(false)
+    home().map(|h| h.join(".claude").exists()).unwrap_or(false)
 }
 
 /// Codex 凭证：`~/.codex/auth.json`，token 可能在顶层或嵌套 `tokens` 对象里。
@@ -105,7 +105,5 @@ pub fn read_codex() -> Option<CodexCreds> {
 }
 
 pub fn codex_present() -> bool {
-    home()
-        .map(|h| h.join(".codex").exists())
-        .unwrap_or(false)
+    home().map(|h| h.join(".codex").exists()).unwrap_or(false)
 }

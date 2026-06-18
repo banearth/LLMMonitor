@@ -130,10 +130,15 @@ fn refresh(
     // Codex JWT 过期预检（Codex 无 refresh token，过期即失效）。
     // Claude 使用 OAuth refresh token 透明续期，expiresAt 过期不代表真的需要重新登录，
     // 直接调 API，用 401 响应来判断是否真的失效，避免误报。
-    let codex_expired = codex_creds.as_ref().map(|c| c.is_expired()).unwrap_or(false);
+    let codex_expired = codex_creds
+        .as_ref()
+        .map(|c| c.is_expired())
+        .unwrap_or(false);
 
     let claude_q = if do_quota {
-        claude_creds.as_ref().map(|c| quota::fetch_claude(client, c))
+        claude_creds
+            .as_ref()
+            .map(|c| quota::fetch_claude(client, c))
     } else {
         None
     };
@@ -142,7 +147,11 @@ fn refresh(
     } else {
         None
     };
-    let codex_cache = if do_quota && !codex_expired { quota::read_codex_cache() } else { None };
+    let codex_cache = if do_quota && !codex_expired {
+        quota::read_codex_cache()
+    } else {
+        None
+    };
 
     // ---- 单次持锁写回 ----
     let (snapshot, total) = {
@@ -292,7 +301,10 @@ mod tests {
         let next = schedule_next(&s, false, now);
         assert!(next > now, "空闲态 next 必须在未来（防每 tick 拉）");
         let d = secs_from_now(&next);
-        assert!((d - IDLE_FALLBACK.as_secs() as i64).abs() <= 10, "应≈兜底心跳, 实得 {d}s");
+        assert!(
+            (d - IDLE_FALLBACK.as_secs() as i64).abs() <= 10,
+            "应≈兜底心跳, 实得 {d}s"
+        );
     }
 
     #[test]
@@ -309,7 +321,10 @@ mod tests {
         let s = shared_with(None, None);
         let next = schedule_next(&s, false, SystemTime::now());
         let d = secs_from_now(&next);
-        assert!((d - IDLE_FALLBACK.as_secs() as i64).abs() <= 10, "无 reset 应走兜底, 实得 {d}s");
+        assert!(
+            (d - IDLE_FALLBACK.as_secs() as i64).abs() <= 10,
+            "无 reset 应走兜底, 实得 {d}s"
+        );
     }
 
     #[test]
@@ -320,7 +335,10 @@ mod tests {
         let next = schedule_next(&s, true, now);
         assert!(next > now);
         let d = secs_from_now(&next);
-        assert!((d - ACTIVE_INTERVAL.as_secs() as i64).abs() <= 5, "应≈活跃周期, 实得 {d}s");
+        assert!(
+            (d - ACTIVE_INTERVAL.as_secs() as i64).abs() <= 5,
+            "应≈活跃周期, 实得 {d}s"
+        );
     }
 
     #[test]
@@ -329,7 +347,10 @@ mod tests {
         let s = shared_with(Some(&iso_offset(30)), None); // 30s + 缓冲15 = 45s < 100s
         let next = schedule_next(&s, true, SystemTime::now());
         let d = secs_from_now(&next);
-        assert!(d < ACTIVE_INTERVAL.as_secs() as i64, "应取更近的 reset, 实得 {d}s");
+        assert!(
+            d < ACTIVE_INTERVAL.as_secs() as i64,
+            "应取更近的 reset, 实得 {d}s"
+        );
         assert!((d - 45).abs() <= 10, "应≈45s, 实得 {d}s");
     }
 }

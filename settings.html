@@ -4,49 +4,49 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/settings.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LLMMonitor 设置</title>
+    <title>LLMMonitor Settings</title>
   </head>
   <body>
     <div class="panel">
       <section>
-        <h2>显示哪些信号灯</h2>
-        <label class="row"><span>🟢 完成</span><input type="checkbox" id="sd" /></label>
-        <label class="row"><span>🟡 等你处理</span><input type="checkbox" id="sw" /></label>
-        <label class="row"><span>🔴 出错/中断</span><input type="checkbox" id="se" /></label>
-        <p class="hint">勾选=在小窗显示该颜色的信号条（已安装版还会弹桌面通知）。</p>
+        <h2>Signals</h2>
+        <label class="row"><span>Done</span><input type="checkbox" id="sd" /></label>
+        <label class="row"><span>Waiting</span><input type="checkbox" id="sw" /></label>
+        <label class="row"><span>Error</span><input type="checkbox" id="se" /></label>
+        <p class="hint">Show matching signal bars in the floating window.</p>
       </section>
 
       <section>
-        <h2>「等你」判定</h2>
-        <label class="row"><span>普通工具卡住也算等你</span><input type="checkbox" id="stall" /></label>
-        <p class="hint">默认关。开了之后，普通命令静默超过阈值也亮黄灯（长命令可能误报；提问/计划批准始终立即亮，不受此开关影响）。</p>
+        <h2>Waiting Rule</h2>
+        <label class="row"><span>Count stalled commands as waiting</span><input type="checkbox" id="stall" /></label>
+        <p class="hint">When enabled, a quiet running command can become waiting after the threshold.</p>
         <label class="row">
-          <span>卡住阈值</span>
-          <span class="ctl"><input type="number" id="waiting" min="10" max="1800" step="10" /> 秒</span>
+          <span>Waiting threshold</span>
+          <span class="ctl"><input type="number" id="waiting" min="10" max="1800" step="10" /> sec</span>
         </label>
         <label class="row">
-          <span>「仍在跑」宽限</span>
-          <span class="ctl"><input type="number" id="grace" min="5" max="600" step="5" /> 秒</span>
+          <span>Running grace</span>
+          <span class="ctl"><input type="number" id="grace" min="5" max="600" step="5" /> sec</span>
         </label>
       </section>
 
       <section>
-        <h2>外观 / 系统</h2>
+        <h2>Window</h2>
         <label class="row">
-          <span>窗口不透明度</span>
+          <span>Opacity</span>
           <span class="ctl"><input type="range" id="op" min="0.3" max="1" step="0.05" /> <b id="opv">100%</b></span>
         </label>
         <label class="row">
-          <span>空闲判定</span>
-          <span class="ctl"><input type="number" id="idle" min="60" max="3600" step="30" /> 秒</span>
+          <span>Idle after</span>
+          <span class="ctl"><input type="number" id="idle" min="60" max="3600" step="30" /> sec</span>
         </label>
-        <p class="hint">多久没烧 token 算空闲（空闲时少打额度接口）。默认 300。</p>
-        <label class="row"><span>开机自启</span><input type="checkbox" id="auto" /></label>
+        <p class="hint">Quota polling slows down after this many seconds without token growth.</p>
+        <label class="row"><span>Start on login</span><input type="checkbox" id="auto" /></label>
       </section>
 
       <div class="actions">
         <span class="saved" id="saved"></span>
-        <button id="close">关闭</button>
+        <button id="close">Close</button>
       </div>
     </div>
     <script type="module" src="/src/settings.ts"></script>

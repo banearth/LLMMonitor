@@ -19,12 +19,30 @@ struct Price {
 fn price_for(model: &str) -> Price {
     let m = model.to_ascii_lowercase();
     if m.contains("opus") {
-        Price { input: 15.0, output: 75.0, cache_read: 1.5, cache_write_5m: 18.75, cache_write_1h: 30.0 }
+        Price {
+            input: 15.0,
+            output: 75.0,
+            cache_read: 1.5,
+            cache_write_5m: 18.75,
+            cache_write_1h: 30.0,
+        }
     } else if m.contains("haiku") {
-        Price { input: 1.0, output: 5.0, cache_read: 0.10, cache_write_5m: 1.25, cache_write_1h: 2.0 }
+        Price {
+            input: 1.0,
+            output: 5.0,
+            cache_read: 0.10,
+            cache_write_5m: 1.25,
+            cache_write_1h: 2.0,
+        }
     } else {
         // sonnet 及未知
-        Price { input: 3.0, output: 15.0, cache_read: 0.30, cache_write_5m: 3.75, cache_write_1h: 6.0 }
+        Price {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.30,
+            cache_write_5m: 3.75,
+            cache_write_1h: 6.0,
+        }
     }
 }
 
@@ -89,8 +107,12 @@ pub fn scan_claude_today() -> Option<UsageTotals> {
             if dt.with_timezone(&Local).date_naive() != today {
                 continue;
             }
-            let Some(msg) = o.get("message") else { continue };
-            let Some(usage) = msg.get("usage") else { continue };
+            let Some(msg) = o.get("message") else {
+                continue;
+            };
+            let Some(usage) = msg.get("usage") else {
+                continue;
+            };
 
             // 去重：同一条消息可能在续接会话里重复出现。
             let msg_id = msg.get("id").and_then(|x| x.as_str()).unwrap_or("");
@@ -127,8 +149,7 @@ pub fn scan_claude_today() -> Option<UsageTotals> {
                 / 1_000_000.0;
 
             totals.cost += cost;
-            totals.tokens +=
-                (input + output + cache_read + cache_create_total).max(0.0) as u64;
+            totals.tokens += (input + output + cache_read + cache_create_total).max(0.0) as u64;
         }
     }
 
@@ -144,7 +165,11 @@ struct CodexPrice {
     output: f64,
 }
 fn codex_price() -> CodexPrice {
-    CodexPrice { input: 1.25, cached_input: 0.125, output: 10.0 }
+    CodexPrice {
+        input: 1.25,
+        cached_input: 0.125,
+        output: 10.0,
+    }
 }
 
 /// 扫描今日（本地时区）Codex 用量。
@@ -191,10 +216,8 @@ pub fn scan_codex_today() -> Option<UsageTotals> {
                 continue;
             };
             let payload = o.get("payload");
-            let is_tc = payload
-                .and_then(|p| p.get("type"))
-                .and_then(|x| x.as_str())
-                == Some("token_count");
+            let is_tc =
+                payload.and_then(|p| p.get("type")).and_then(|x| x.as_str()) == Some("token_count");
             if !is_tc {
                 continue;
             }

@@ -37,29 +37,34 @@ function collect(): Settings {
 
 async function persist() {
   await invoke("save_settings", { new: collect() }).catch(() => {});
-  const el = document.getElementById("saved")!;
-  el.textContent = "已保存";
+  const el = document.getElementById("saved");
+  if (!el) return;
+  el.textContent = "saved";
   el.classList.add("show");
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => el.classList.remove("show"), 1200);
 }
 
 function bind() {
-  // 改即存（防抖）
   const debounced = () => {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = window.setTimeout(persist, 250);
   };
+
   for (const id of ["waiting", "grace", "idle", "op"]) {
     $(id).addEventListener("input", () => {
-      if (id === "op") $("opv").textContent = Math.round(parseFloat($("op").value) * 100) + "%";
+      if (id === "op") {
+        $("opv").textContent = Math.round(parseFloat($("op").value) * 100) + "%";
+      }
       debounced();
     });
   }
+
   for (const id of ["sd", "sw", "se", "stall", "auto"]) {
     $(id).addEventListener("change", persist);
   }
-  document.getElementById("close")!.addEventListener("click", () => getCurrentWindow().hide());
+
+  document.getElementById("close")?.addEventListener("click", () => getCurrentWindow().hide());
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -73,10 +78,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     $("waiting").value = String(s.waitingThresholdSecs);
     $("grace").value = String(s.runningGraceSecs);
     $("op").value = String(s.opacity);
-    document.getElementById("opv")!.textContent = Math.round(s.opacity * 100) + "%";
+    $("opv").textContent = Math.round(s.opacity * 100) + "%";
     $("idle").value = String(s.idleAfterSecs);
     $("auto").checked = s.autoStart;
   } catch (_) {
-    /* 用默认值 */
+    /* keep defaults */
   }
 });

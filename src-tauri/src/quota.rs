@@ -36,6 +36,8 @@ pub struct QuotaResult {
     pub blocked: bool,
     /// 套餐类型，如 "free"/"plus"/"pro"；拿不到为 None。
     pub plan_type: Option<String>,
+    /// 是否有可用余额（credits.has_credits）。用于判断“真实恢复”。
+    pub has_credits: bool,
 }
 
 /// 接口返回的 utilization / used_percent 都是 0–100 的百分比，直接用。
@@ -72,6 +74,7 @@ pub fn fetch_claude(
             logged_in: false,
             blocked: false,
             plan_type: None,
+            has_credits: false,
         });
     }
     if !status.is_success() {
@@ -103,6 +106,7 @@ pub fn fetch_claude(
         // Claude 端不提供这些字段，保持默认，不影响 Claude 显示。
         blocked: false,
         plan_type: None,
+        has_credits: false,
     })
 }
 
@@ -128,6 +132,7 @@ pub fn fetch_codex(client: &reqwest::blocking::Client, creds: &CodexCreds) -> Re
             logged_in: false,
             blocked: false,
             plan_type: None,
+            has_credits: false,
         });
     }
     if !status.is_success() {
@@ -153,6 +158,11 @@ pub fn parse_codex_value(v: &Value) -> QuotaResult {
         .get("plan_type")
         .and_then(|x| x.as_str())
         .map(String::from);
+    let has_credits = v
+        .get("credits")
+        .and_then(|c| c.get("has_credits"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
 
     let parse = |key: &str| -> Option<Window> {
         let o = rl.get(key)?;
@@ -187,6 +197,7 @@ pub fn parse_codex_value(v: &Value) -> QuotaResult {
         logged_in: true,
         blocked,
         plan_type,
+        has_credits,
     }
 }
 
@@ -228,6 +239,17 @@ mod tests {
         assert_eq!(five.remaining, 0.0);
         assert!(five.resets_at.is_some(), "应带恢复时间");
         assert!(r.seven_day.is_none(), "secondary_window=null 应为 None");
+        assert!(!r.has_credits, "has_credits=false 应解析出无余额");
+    }
+
+    /// credits.has_credits=true 应被解析出（粘滞封禁靠它判断真实恢复）。
+    #[test]
+    fn has_credits_parsed() {
+        let v = json!({
+            "rate_limit": { "allowed": true, "primary_window": { "used_percent": 5 } },
+            "credits": { "has_credits": true }
+        });
+        assert!(parse_codex_value(&v).has_credits);
     }
 
     /// allowed=false 单独也应触发 blocked（即便 limit_reached 缺失）。

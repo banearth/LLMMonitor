@@ -36,6 +36,9 @@ pub struct Provider {
     pub blocked: bool,
     /// 套餐类型，如 "free"/"plus"/"pro"；拿不到为 None。
     pub plan: Option<String>,
+    /// 粘滞封禁的恢复时间（ISO）。看到 limit_reached 时记下；在此之前即使接口
+    /// 瞬时回乐观值也维持“额度耗尽”，避免额度券瞬时窗口让 95% 还魂。
+    pub blocked_until: Option<String>,
 }
 
 /// 整个应用对外暴露的状态。

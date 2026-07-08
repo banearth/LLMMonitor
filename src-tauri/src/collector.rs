@@ -212,13 +212,41 @@ fn refresh(
                     st.codex.logged_in = true;
                     // blocked/plan 只在实时同步成功时更新（cache/出错路径不动它，
                     // 保持最后一次实时结论，避免网络抖动把“耗尽”翻回“乐观”）。
-                    st.codex.blocked = r.blocked;
                     st.codex.plan = r.plan_type.clone();
+
+                    // 粘滞封禁：看到 limit_reached 就记住恢复时间；在那之前，即使接口
+                    // 瞬时回一个乐观窗口（额度券导致），也维持“额度耗尽”——除非检测到
+                    // 真实恢复（套餐升级或有可用余额），避免 95% 还魂。
+                    let now = SystemTime::now();
+                    let sticky = st
+                        .codex
+                        .blocked_until
+                        .as_deref()
+                        .and_then(parse_iso)
+                        .map(|until| until > now)
+                        .unwrap_or(false);
+                    let genuine_recovery =
+                        r.plan_type.as_deref() != Some("free") || r.has_credits;
+
                     if r.blocked {
-                        // 明确耗尽：用响应值整体覆盖，冲掉可能残留的乐观旧百分比。
+                        // 明确耗尽：记录恢复时间，用响应值整体覆盖，冲掉残留乐观值。
+                        st.codex.blocked = true;
+                        st.codex.blocked_until =
+                            r.five_hour.as_ref().and_then(|w| w.resets_at.clone());
                         st.codex.five_hour = r.five_hour.clone();
                         st.codex.seven_day = r.seven_day.clone();
+                    } else if sticky && !genuine_recovery {
+                        // 瞬时乐观值：压制，继续显示耗尽（保留恢复时间）。
+                        st.codex.blocked = true;
+                        st.codex.five_hour = Some(crate::state::Window {
+                            remaining: 0.0,
+                            resets_at: st.codex.blocked_until.clone(),
+                        });
+                        st.codex.seven_day = None;
                     } else {
+                        // 真实可用（或已过恢复时间）：解除封禁，正常更新窗口。
+                        st.codex.blocked = false;
+                        st.codex.blocked_until = None;
                         if r.five_hour.is_some() {
                             st.codex.five_hour = r.five_hour.clone();
                         }

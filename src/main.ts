@@ -181,21 +181,31 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
 
   if (note) note.textContent = p.stale ? p.error ?? "sync failed" : "";
 
+  // 每次都完整覆盖所有字段：数据缺失时回退占位符，避免上一次渲染（如 blocked 的
+  // “额度耗尽”）的残影和新值并存造成自相矛盾的显示。
   const five = p.fiveHour;
+  const bar = $(`${key}-bar`);
   if (five) {
     setText(`${key}-pct`, fmtPct(five.remaining));
-    const bar = $(`${key}-bar`);
     if (bar) {
       bar.style.width = `${Math.max(2, Math.min(100, five.remaining))}%`;
       bar.className = `fill ${barClass(five.remaining)}`;
     }
     setText(`${key}-5h`, fmtResetShort(five.resetsAt));
+  } else {
+    setText(`${key}-pct`, "--");
+    if (bar) {
+      bar.style.width = "0%";
+      bar.className = "fill";
+    }
+    setText(`${key}-5h`, "reset --:--");
   }
 
   const seven = p.sevenDay;
-  if (seven) {
-    setText(`${key}-7d`, `${fmtPct(seven.remaining)}% - ${fmtResetDate(seven.resetsAt)}`);
-  }
+  setText(
+    `${key}-7d`,
+    seven ? `${fmtPct(seven.remaining)}% - ${fmtResetDate(seven.resetsAt)}` : "-- - --",
+  );
 }
 
 function render(state: AppState) {

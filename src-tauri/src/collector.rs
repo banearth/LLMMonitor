@@ -208,13 +208,23 @@ fn refresh(
         if do_quota && codex_creds.is_some() && !codex_expired {
             let mut applied = false;
             if let Some(Ok(r)) = &codex_net {
-                if r.logged_in && (r.five_hour.is_some() || r.seven_day.is_some()) {
+                if r.logged_in && (r.five_hour.is_some() || r.seven_day.is_some() || r.blocked) {
                     st.codex.logged_in = true;
-                    if r.five_hour.is_some() {
+                    // blocked/plan 只在实时同步成功时更新（cache/出错路径不动它，
+                    // 保持最后一次实时结论，避免网络抖动把“耗尽”翻回“乐观”）。
+                    st.codex.blocked = r.blocked;
+                    st.codex.plan = r.plan_type.clone();
+                    if r.blocked {
+                        // 明确耗尽：用响应值整体覆盖，冲掉可能残留的乐观旧百分比。
                         st.codex.five_hour = r.five_hour.clone();
-                    }
-                    if r.seven_day.is_some() {
                         st.codex.seven_day = r.seven_day.clone();
+                    } else {
+                        if r.five_hour.is_some() {
+                            st.codex.five_hour = r.five_hour.clone();
+                        }
+                        if r.seven_day.is_some() {
+                            st.codex.seven_day = r.seven_day.clone();
+                        }
                     }
                     st.codex.stale = false;
                     st.codex.error = None;

@@ -21,6 +21,8 @@ interface Provider {
   todayCost: number | null;
   stale: boolean;
   error: string | null;
+  blocked: boolean;
+  plan: string | null;
 }
 
 interface AppState {
@@ -117,6 +119,18 @@ function barClass(remaining: number): string {
   return "ok";
 }
 
+function planLabel(plan: string | null): string {
+  const base = "额度已用尽";
+  if (!plan) return base;
+  const m: Record<string, string> = {
+    free: "免费档",
+    plus: "Plus",
+    pro: "Pro",
+    team: "Team",
+  };
+  return `${m[plan] ?? plan} · ${base}`;
+}
+
 function applyOpacity(o: number) {
   const v = Math.max(0.3, Math.min(1, o || 1));
   const root = document.getElementById("root");
@@ -143,6 +157,25 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
     setText(`${key}-5h`, "reset --:--");
     setText(`${key}-7d`, "-- - --");
     if (note) note.textContent = p.error ?? "not logged in";
+    return;
+  }
+
+  // 接口明确「不可用」（额度耗尽/未订阅）：显示明确状态，而不是一个乐观百分比。
+  if (p.blocked) {
+    setText(`${key}-pct`, "0");
+    const bar = $(`${key}-bar`);
+    if (bar) {
+      bar.style.width = "2%";
+      bar.className = "fill danger";
+    }
+    const five = p.fiveHour;
+    setText(`${key}-5h`, five ? fmtResetShort(five.resetsAt) : "reset --:--");
+    setText(`${key}-7d`, "额度耗尽");
+    if (note) {
+      note.textContent =
+        planLabel(p.plan) +
+        (five?.resetsAt ? ` · ${fmtResetDate(five.resetsAt)} 恢复` : "");
+    }
     return;
   }
 

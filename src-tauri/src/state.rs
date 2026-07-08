@@ -32,6 +32,10 @@ pub struct Provider {
     pub stale: bool,
     /// 最近一次错误信息（用于提示）。
     pub error: Option<String>,
+    /// 接口明确表示当前额度不可用（耗尽/未订阅）。仅由实时同步更新。
+    pub blocked: bool,
+    /// 套餐类型，如 "free"/"plus"/"pro"；拿不到为 None。
+    pub plan: Option<String>,
 }
 
 /// 整个应用对外暴露的状态。

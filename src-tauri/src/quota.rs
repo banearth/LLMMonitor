@@ -32,6 +32,10 @@ pub struct QuotaResult {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
     pub logged_in: bool,
+    /// 接口明确表示当前额度不可用（allowed=false 或 limit_reached=true）。
+    pub blocked: bool,
+    /// 套餐类型，如 "free"/"plus"/"pro"；拿不到为 None。
+    pub plan_type: Option<String>,
 }
 
 /// 接口返回的 utilization / used_percent 都是 0–100 的百分比，直接用。
@@ -66,6 +70,8 @@ pub fn fetch_claude(
             five_hour: None,
             seven_day: None,
             logged_in: false,
+            blocked: false,
+            plan_type: None,
         });
     }
     if !status.is_success() {
@@ -94,6 +100,9 @@ pub fn fetch_claude(
         five_hour: parse("five_hour"),
         seven_day: parse("seven_day"),
         logged_in: true,
+        // Claude 端不提供这些字段，保持默认，不影响 Claude 显示。
+        blocked: false,
+        plan_type: None,
     })
 }
 
@@ -117,6 +126,8 @@ pub fn fetch_codex(client: &reqwest::blocking::Client, creds: &CodexCreds) -> Re
             five_hour: None,
             seven_day: None,
             logged_in: false,
+            blocked: false,
+            plan_type: None,
         });
     }
     if !status.is_success() {
@@ -132,6 +143,16 @@ pub fn fetch_codex(client: &reqwest::blocking::Client, creds: &CodexCreds) -> Re
 /// 也兼容把 rate_limit 直接放在顶层、或字段名为 utilization / resets_at(ISO) 的情况。
 pub fn parse_codex_value(v: &Value) -> QuotaResult {
     let rl = v.get("rate_limit").unwrap_or(v);
+
+    // 权威「不可用」信号：allowed=false 或 limit_reached=true 即当前额度不可用。
+    // （credits.has_credits 不纳入：Plus 用户可用但无 overage 余额时会误报。）
+    let allowed = rl.get("allowed").and_then(|x| x.as_bool());
+    let limit_reached = rl.get("limit_reached").and_then(|x| x.as_bool());
+    let blocked = allowed == Some(false) || limit_reached == Some(true);
+    let plan_type = v
+        .get("plan_type")
+        .and_then(|x| x.as_str())
+        .map(String::from);
 
     let parse = |key: &str| -> Option<Window> {
         let o = rl.get(key)?;
@@ -164,6 +185,8 @@ pub fn parse_codex_value(v: &Value) -> QuotaResult {
         five_hour: parse("primary_window"),
         seven_day: parse("secondary_window"),
         logged_in: true,
+        blocked,
+        plan_type,
     }
 }
 
@@ -177,5 +200,75 @@ pub fn read_codex_cache() -> Option<QuotaResult> {
         Some(r)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 免费档 + limit_reached：必须判为 blocked，且窗口剩余归零。
+    #[test]
+    fn free_plan_limit_reached_is_blocked() {
+        let v = json!({
+            "plan_type": "free",
+            "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": { "used_percent": 100, "reset_at": 1785170765i64 },
+                "secondary_window": null
+            },
+            "credits": { "has_credits": false }
+        });
+        let r = parse_codex_value(&v);
+        assert!(r.blocked, "limit_reached=true 应视为 blocked");
+        assert_eq!(r.plan_type.as_deref(), Some("free"));
+        let five = r.five_hour.expect("primary_window 应解析出窗口");
+        assert_eq!(five.remaining, 0.0);
+        assert!(five.resets_at.is_some(), "应带恢复时间");
+        assert!(r.seven_day.is_none(), "secondary_window=null 应为 None");
+    }
+
+    /// allowed=false 单独也应触发 blocked（即便 limit_reached 缺失）。
+    #[test]
+    fn allowed_false_alone_is_blocked() {
+        let v = json!({
+            "rate_limit": {
+                "allowed": false,
+                "primary_window": { "used_percent": 40, "reset_at": 1785170765i64 }
+            }
+        });
+        assert!(parse_codex_value(&v).blocked);
+    }
+
+    /// 正常账号：allowed=true 不 blocked，百分比正常换算。
+    #[test]
+    fn normal_plan_not_blocked() {
+        let v = json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": { "used_percent": 5, "reset_at": 1785170765i64 },
+                "secondary_window": { "used_percent": 20, "reset_at": 1785200000i64 }
+            }
+        });
+        let r = parse_codex_value(&v);
+        assert!(!r.blocked);
+        assert_eq!(r.plan_type.as_deref(), Some("plus"));
+        assert_eq!(r.five_hour.unwrap().remaining, 95.0);
+        assert_eq!(r.seven_day.unwrap().remaining, 80.0);
+    }
+
+    /// 缺失 allowed/limit_reached（老缓存形状）：不应误判为 blocked。
+    #[test]
+    fn missing_flags_not_blocked() {
+        let v = json!({
+            "rate_limit": {
+                "primary_window": { "used_percent": 10, "reset_at": 1785170765i64 }
+            }
+        });
+        assert!(!parse_codex_value(&v).blocked);
     }
 }

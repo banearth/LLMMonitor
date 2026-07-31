@@ -179,7 +179,16 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
     return;
   }
 
-  if (note) note.textContent = p.stale ? p.error ?? "sync failed" : "";
+  if (note) {
+    note.textContent = p.stale ? p.error ?? "sync failed" : p.plan === "free" ? "免费档" : "";
+  }
+
+  // free 档的额度窗口实际是月度滚动，不是 5 小时；标签跟着套餐类型走，
+  // 避免继续显示 "5h" 误导用户以为是付费档的 5 小时窗口。
+  if (key === "codex") {
+    const label = $(`${key}-5h-label`);
+    if (label) label.textContent = p.plan === "free" ? "本月" : "5h";
+  }
 
   // 每次都完整覆盖所有字段：数据缺失时回退占位符，避免上一次渲染（如 blocked 的
   // “额度耗尽”）的残影和新值并存造成自相矛盾的显示。
@@ -191,7 +200,11 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
       bar.style.width = `${Math.max(2, Math.min(100, five.remaining))}%`;
       bar.className = `fill ${barClass(five.remaining)}`;
     }
-    setText(`${key}-5h`, fmtResetShort(five.resetsAt));
+    // free 档窗口是月度滚动，只显示时:分会把"一个月后"误显示成"今天"——带上日期。
+    setText(
+      `${key}-5h`,
+      p.plan === "free" ? `reset ${fmtResetDate(five.resetsAt)}` : fmtResetShort(five.resetsAt),
+    );
   } else {
     setText(`${key}-pct`, "--");
     if (bar) {

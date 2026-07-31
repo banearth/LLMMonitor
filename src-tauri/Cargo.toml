@@ -1,6 +1,6 @@
 [package]
 name = "llmmonitor"
-version = "0.1.6"
+version = "0.1.7"
 description = "LLMMonitor — 桌面 AI 额度悬浮窗"
 authors = ["bandingyue"]
 edition = "2021"

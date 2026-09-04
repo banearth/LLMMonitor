@@ -24,8 +24,11 @@ fn get_state(state: tauri::State<Shared>) -> AppState {
 }
 
 #[tauri::command]
-fn get_chips(state: tauri::State<SharedActivity>) -> Vec<Chip> {
-    activity::visible_chips(state.inner())
+fn get_chips(
+    state: tauri::State<SharedActivity>,
+    settings: tauri::State<SharedSettings>,
+) -> Vec<Chip> {
+    activity::visible_chips(state.inner(), settings.inner())
 }
 
 #[tauri::command]
@@ -37,6 +40,7 @@ fn refresh_now(tx: tauri::State<RefreshTx>) {
 fn dismiss_chip(
     app: tauri::AppHandle,
     state: tauri::State<SharedActivity>,
+    settings: tauri::State<SharedSettings>,
     id: String,
     trigger: String,
 ) {
@@ -44,7 +48,7 @@ fn dismiss_chip(
         let mut st = state.lock().unwrap();
         st.dismissed.insert(id.clone(), trigger.clone());
     }
-    let chips = activity::visible_chips(state.inner());
+    let chips = activity::visible_chips(state.inner(), settings.inner());
     let _ = app.emit("chips-updated", &chips);
 }
 
@@ -58,22 +62,36 @@ fn save_settings(
     app: tauri::AppHandle,
     s: tauri::State<SharedSettings>,
     activity: tauri::State<SharedActivity>,
+    state: tauri::State<Shared>,
+    refresh: tauri::State<RefreshTx>,
     new: Settings,
 ) {
     let opacity = new.opacity.clamp(0.3, 1.0);
     let auto_start = new.auto_start;
     // 记录旧的显示开关 + 新值，用于检测「开→关」
-    let (old_d, old_w, old_e) = {
+    let (old_d, old_w, old_e, old_claude, old_codex) = {
         let g = s.lock().unwrap();
-        (g.show_done, g.show_waiting, g.show_error)
+        (
+            g.show_done,
+            g.show_waiting,
+            g.show_error,
+            g.enable_claude,
+            g.enable_codex,
+        )
     };
     let (new_d, new_w, new_e) = (new.show_done, new.show_waiting, new.show_error);
-    {
+    let (new_claude, new_codex) = (new.enable_claude, new.enable_codex);
+    let saved = {
         let mut guard = s.lock().unwrap();
+        // 设置页不负责窗口坐标；保存复选框/阈值时保留主窗口刚刚记录的位置。
+        let (main_window_x, main_window_y) = (guard.main_window_x, guard.main_window_y);
         *guard = new;
         guard.opacity = opacity;
-    }
-    config::save(&s.lock().unwrap());
+        guard.main_window_x = main_window_x;
+        guard.main_window_y = main_window_y;
+        guard.clone()
+    };
+    config::save(&saved);
 
     // 颜色从开→关：把当前该颜色的信号条全部标记已处理（清掉且不复活）
     if old_d && !new_d {
@@ -85,12 +103,34 @@ fn save_settings(
     if old_e && !new_e {
         activity::mute_color(activity.inner(), "error");
     }
+    if old_claude && !new_claude {
+        activity::mute_tool(activity.inner(), "claude");
+    }
+    if old_codex && !new_codex {
+        activity::mute_tool(activity.inner(), "codex");
+    }
+
+    // 先清掉禁用服务的旧快照，让卡片在设置保存后立即消失。
+    let state_snapshot = {
+        let mut st = state.lock().unwrap();
+        if !new_claude {
+            st.claude = Default::default();
+        }
+        if !new_codex {
+            st.codex = Default::default();
+        }
+        st.clone()
+    };
 
     let _ = app.emit("apply-opacity", opacity);
+    let _ = app.emit("settings-updated", &saved);
+    let _ = app.emit("state-updated", state_snapshot);
     config::set_autostart(auto_start);
-    // 立即刷新信号条（关掉的颜色当场消失）
-    let chips = activity::visible_chips(activity.inner());
+    // 立即刷新信号条（关掉的颜色/服务当场消失）
+    let chips = activity::visible_chips(activity.inner(), s.inner());
     let _ = app.emit("chips-updated", &chips);
+    // 重新开启服务时立即采集；关闭时也让后台尽快收敛到新状态。
+    let _ = refresh.0.lock().unwrap().send(());
 }
 
 // ── 窗口辅助 ──────────────────────────────────────────────────────────

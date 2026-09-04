@@ -4,6 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 
 interface Settings {
+  enableClaude: boolean;
+  enableCodex: boolean;
   showDone: boolean;
   showWaiting: boolean;
   showError: boolean;
@@ -23,6 +25,8 @@ let saveTimer: number | undefined;
 
 function collect(): Settings {
   return {
+    enableClaude: $("claude").checked,
+    enableCodex: $("codex").checked,
     showDone: $("sd").checked,
     showWaiting: $("sw").checked,
     showError: $("se").checked,
@@ -60,7 +64,7 @@ function bind() {
     });
   }
 
-  for (const id of ["sd", "sw", "se", "stall", "auto"]) {
+  for (const id of ["claude", "codex", "sd", "sw", "se", "stall", "auto"]) {
     $(id).addEventListener("change", persist);
   }
 
@@ -71,6 +75,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   bind();
   try {
     const s = await invoke<Settings>("get_settings");
+    $("claude").checked = s.enableClaude;
+    $("codex").checked = s.enableCodex;
     $("sd").checked = s.showDone;
     $("sw").checked = s.showWaiting;
     $("se").checked = s.showError;

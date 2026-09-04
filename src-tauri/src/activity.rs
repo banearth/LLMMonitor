@@ -448,6 +448,7 @@ struct Entry {
 struct Scanner {
     active: HashMap<PathBuf, Entry>,
     last_discovery: Option<Instant>,
+    enabled: Option<(bool, bool)>,
     codex_title_mtime: Option<Option<SystemTime>>,
     claude_title_mtime: Option<Option<SystemTime>>,
     settings: crate::config::SharedSettings,
@@ -458,6 +459,7 @@ impl Scanner {
         Self {
             active: HashMap::new(),
             last_discovery: None,
+            enabled: None,
             codex_title_mtime: None,
             claude_title_mtime: None,
             settings,
@@ -502,7 +504,7 @@ fn codex_date_dirs(sroot: &Path) -> Vec<PathBuf> {
 
 impl Scanner {
     /// 全量 walk，把近期改动的文件并入活跃集合（低频调用）。
-    fn discover(&mut self) {
+    fn discover(&mut self, enable_claude: bool, enable_codex: bool) {
         let cutoff = SystemTime::now() - Duration::from_secs(ACTIVE_WINDOW_SECS);
         let Some(home) = dirs::home_dir() else {
             return;
@@ -528,39 +530,55 @@ impl Scanner {
             }
         };
 
-        add(
-            &home.join(".claude").join("projects"),
-            Src::Claude,
-            &mut self.active,
-        );
-        let sroot = home.join(".codex").join("sessions");
-        for d in codex_date_dirs(&sroot) {
-            add(&d, Src::Codex, &mut self.active);
+        if enable_claude {
+            add(
+                &home.join(".claude").join("projects"),
+                Src::Claude,
+                &mut self.active,
+            );
+        }
+        if enable_codex {
+            let sroot = home.join(".codex").join("sessions");
+            for d in codex_date_dirs(&sroot) {
+                add(&d, Src::Codex, &mut self.active);
+            }
         }
     }
 
     /// 每 4 秒一次：必要时发现；对活跃文件 stat，仅 mtime 变化的重读；judging 全跑。
     fn tick(&mut self) -> Vec<Chip> {
-        let due = self
-            .last_discovery
-            .map(|t| t.elapsed() >= DISCOVERY_INTERVAL)
-            .unwrap_or(true);
-        if due {
-            self.discover();
-            self.last_discovery = Some(Instant::now());
-        }
-
         // 每 tick 从设置读阈值/开关（用户修改后立即生效）
-        let (stall, wt, rg) = {
+        let (stall, wt, rg, enable_claude, enable_codex) = {
             let s = self.settings.lock().unwrap();
             (
                 s.stall_to_waiting,
                 s.waiting_threshold_secs,
                 s.running_grace_secs,
+                s.enable_claude,
+                s.enable_codex,
             )
         };
-        let codex_titles_changed = self.codex_titles_changed();
-        let claude_titles_changed = self.claude_titles_changed();
+        let enabled = (enable_claude, enable_codex);
+        if self.enabled != Some(enabled) {
+            self.enabled = Some(enabled);
+            self.last_discovery = None;
+            self.active.retain(|_, entry| match entry.src {
+                Src::Claude => enable_claude,
+                Src::Codex => enable_codex,
+            });
+        }
+
+        let due = self
+            .last_discovery
+            .map(|t| t.elapsed() >= DISCOVERY_INTERVAL)
+            .unwrap_or(true);
+        if due {
+            self.discover(enable_claude, enable_codex);
+            self.last_discovery = Some(Instant::now());
+        }
+
+        let codex_titles_changed = enable_codex && self.codex_titles_changed();
+        let claude_titles_changed = enable_claude && self.claude_titles_changed();
 
         let cutoff = SystemTime::now() - Duration::from_secs(ACTIVE_WINDOW_SECS);
         let mut chips = Vec::new();
@@ -621,18 +639,33 @@ fn sig(c: &Chip) -> String {
     format!("{}|{}|{}", c.id, c.state, c.trigger)
 }
 
-/// 当前要给前端的信号条 = 候选集里没被 dismiss 的。
-/// （关闭的颜色其 chip 会被自动 dismiss，所以这里只看 dismiss 即可。）
-pub fn visible_chips(activity: &SharedActivity) -> Vec<Chip> {
+fn tool_enabled(tool: &str, enable_claude: bool, enable_codex: bool) -> bool {
+    match tool {
+        "claude" => enable_claude,
+        "codex" => enable_codex,
+        _ => false,
+    }
+}
+
+/// 当前要给前端的信号条 = 已启用服务的候选集里没被 dismiss 的。
+pub fn visible_chips(
+    activity: &SharedActivity,
+    settings: &crate::config::SharedSettings,
+) -> Vec<Chip> {
+    let (enable_claude, enable_codex) = {
+        let s = settings.lock().unwrap();
+        (s.enable_claude, s.enable_codex)
+    };
     let st = activity.lock().unwrap();
     let dismissed = &st.dismissed;
     st.chips
         .iter()
         .filter(|c| {
-            dismissed
-                .get(&c.id)
-                .map(|d| d != &c.trigger)
-                .unwrap_or(true)
+            tool_enabled(&c.tool, enable_claude, enable_codex)
+                && dismissed
+                    .get(&c.id)
+                    .map(|d| d != &c.trigger)
+                    .unwrap_or(true)
         })
         .cloned()
         .collect()
@@ -646,6 +679,20 @@ pub fn mute_color(activity: &SharedActivity, state: &str) {
         .chips
         .iter()
         .filter(|c| c.state == state)
+        .map(|c| (c.id.clone(), c.trigger.clone()))
+        .collect();
+    for (id, trig) in targets {
+        st.dismissed.insert(id, trig);
+    }
+}
+
+/// 隐藏某服务时把它当前的信号标记为已处理，重新开启后不会突然复活旧通知。
+pub fn mute_tool(activity: &SharedActivity, tool: &str) {
+    let mut st = activity.lock().unwrap();
+    let targets: Vec<(String, String)> = st
+        .chips
+        .iter()
+        .filter(|c| c.tool == tool)
         .map(|c| (c.id.clone(), c.trigger.clone()))
         .collect();
     for (id, trig) in targets {
@@ -681,21 +728,27 @@ pub fn run(handle: AppHandle, shared: SharedActivity, settings: crate::config::S
     let mut prev: HashSet<String> = HashSet::new();
     loop {
         let computed = scanner.tick();
-        // 关闭的颜色：当前及之后新出现的 chip 都自动 dismiss（订阅式语义——
+        // 关闭的颜色/服务：当前及之后新出现的 chip 都自动 dismiss（订阅式语义——
         // 关了不再出现、当前也清掉；开回来不复活旧的，只显示全新的）。
-        let (sd, sw, se) = {
-            let c = settings.lock().unwrap();
-            (c.show_done, c.show_waiting, c.show_error)
-        };
+        // 设置锁保留到本轮发布完成，让保存动作和通知/事件之间有确定顺序。
+        let current_settings = settings.lock().unwrap();
+        let (sd, sw, se, enable_claude, enable_codex) = (
+            current_settings.show_done,
+            current_settings.show_waiting,
+            current_settings.show_error,
+            current_settings.enable_claude,
+            current_settings.enable_codex,
+        );
         let visible: Vec<Chip> = {
             let mut st = shared.lock().unwrap();
             for c in &computed {
-                let muted = match c.state.as_str() {
+                let muted_state = match c.state.as_str() {
                     "done" => !sd,
                     "waiting" => !sw,
                     "error" => !se,
                     _ => false,
                 };
+                let muted = muted_state || !tool_enabled(&c.tool, enable_claude, enable_codex);
                 if muted {
                     st.dismissed.insert(c.id.clone(), c.trigger.clone());
                 }
@@ -725,6 +778,7 @@ pub fn run(handle: AppHandle, shared: SharedActivity, settings: crate::config::S
         prev = visible.iter().map(sig).collect();
 
         let _ = handle.emit("chips-updated", &visible);
+        drop(current_settings);
         std::thread::sleep(TICK);
     }
 }
@@ -757,6 +811,29 @@ mod tests {
             kind,
             last_ts: ts.into(),
         }
+    }
+
+    fn chip(id: &str, tool: &str) -> Chip {
+        Chip {
+            id: id.into(),
+            tool: tool.into(),
+            project: "p".into(),
+            folder: "p".into(),
+            state: "done".into(),
+            since: "2026-01-01T00:00:00Z".into(),
+            trigger: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn disabled_provider_is_filtered_from_visible_chips() {
+        let activity = new_shared();
+        activity.lock().unwrap().chips = vec![chip("c", "claude"), chip("x", "codex")];
+        let settings = Arc::new(Mutex::new(crate::config::Settings::default()));
+        settings.lock().unwrap().enable_claude = false;
+
+        let visible = visible_chips(&activity, &settings);
+        assert_eq!(visible, vec![chip("x", "codex")]);
     }
 
     #[test]

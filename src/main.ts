@@ -31,6 +31,12 @@ interface AppState {
   lastSync: string | null;
 }
 
+interface MonitorSettings {
+  enableClaude: boolean;
+  enableCodex: boolean;
+  opacity: number;
+}
+
 interface Chip {
   id: string;
   tool: string;
@@ -137,11 +143,24 @@ function applyOpacity(o: number) {
   if (root) root.style.opacity = String(v);
 }
 
-function renderProvider(key: "claude" | "codex", p: Provider) {
+let monitorSettings: MonitorSettings = {
+  enableClaude: true,
+  enableCodex: true,
+  opacity: 1,
+};
+let latestState: AppState | null = null;
+
+function applySettings(settings: MonitorSettings) {
+  monitorSettings = settings;
+  applyOpacity(settings.opacity);
+  if (latestState) render(latestState);
+}
+
+function renderProvider(key: "claude" | "codex", p: Provider, enabled: boolean) {
   const zone = $(`zone-${key}`);
   if (!zone) return;
 
-  if (!p.present) {
+  if (!enabled || !p.present) {
     zone.classList.add("hidden");
     return;
   }
@@ -169,12 +188,14 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
       bar.className = "fill danger";
     }
     const five = p.fiveHour;
+    const seven = p.sevenDay;
+    const limiting = five ?? seven;
     setText(`${key}-5h`, five ? fmtResetShort(five.resetsAt) : "reset --:--");
     setText(`${key}-7d`, "额度耗尽");
     if (note) {
       note.textContent =
         planLabel(p.plan) +
-        (five?.resetsAt ? ` · ${fmtResetDate(five.resetsAt)} 恢复` : "");
+        (limiting?.resetsAt ? ` · ${fmtResetDate(limiting.resetsAt)} 恢复` : "");
     }
     return;
   }
@@ -193,28 +214,35 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
   // 每次都完整覆盖所有字段：数据缺失时回退占位符，避免上一次渲染（如 blocked 的
   // “额度耗尽”）的残影和新值并存造成自相矛盾的显示。
   const five = p.fiveHour;
+  const seven = p.sevenDay;
+  // 某些套餐当前只返回 7 天窗口；顶部摘要展示任一可用主窗口，具体类型仍由下方
+  // 5h / 7d 行准确标注。
+  const summary = five ?? seven;
   const bar = $(`${key}-bar`);
-  if (five) {
-    setText(`${key}-pct`, fmtPct(five.remaining));
+  if (summary) {
+    setText(`${key}-pct`, fmtPct(summary.remaining));
     if (bar) {
-      bar.style.width = `${Math.max(2, Math.min(100, five.remaining))}%`;
-      bar.className = `fill ${barClass(five.remaining)}`;
+      bar.style.width = `${Math.max(2, Math.min(100, summary.remaining))}%`;
+      bar.className = `fill ${barClass(summary.remaining)}`;
     }
-    // free 档窗口是月度滚动，只显示时:分会把"一个月后"误显示成"今天"——带上日期。
-    setText(
-      `${key}-5h`,
-      p.plan === "free" ? `reset ${fmtResetDate(five.resetsAt)}` : fmtResetShort(five.resetsAt),
-    );
   } else {
     setText(`${key}-pct`, "--");
     if (bar) {
       bar.style.width = "0%";
       bar.className = "fill";
     }
-    setText(`${key}-5h`, "reset --:--");
   }
 
-  const seven = p.sevenDay;
+  // free 档窗口是月度滚动，只显示时:分会把"一个月后"误显示成"今天"——带上日期。
+  setText(
+    `${key}-5h`,
+    five
+      ? p.plan === "free"
+        ? `reset ${fmtResetDate(five.resetsAt)}`
+        : fmtResetShort(five.resetsAt)
+      : "reset --:--",
+  );
+
   setText(
     `${key}-7d`,
     seven ? `${fmtPct(seven.remaining)}% - ${fmtResetDate(seven.resetsAt)}` : "-- - --",
@@ -222,19 +250,28 @@ function renderProvider(key: "claude" | "codex", p: Provider) {
 }
 
 function render(state: AppState) {
-  renderProvider("claude", state.claude);
-  renderProvider("codex", state.codex);
+  latestState = state;
+  const claudeVisible = monitorSettings.enableClaude && state.claude.present;
+  const codexVisible = monitorSettings.enableCodex && state.codex.present;
+
+  renderProvider("claude", state.claude, monitorSettings.enableClaude);
+  renderProvider("codex", state.codex, monitorSettings.enableCodex);
 
   setText("sync-time", fmtSync(state.lastSync));
   const sync = $("sync");
-  if (sync) sync.classList.toggle("warn", state.claude.stale || state.codex.stale);
+  if (sync) {
+    sync.classList.toggle(
+      "warn",
+      (claudeVisible && state.claude.stale) || (codexVisible && state.codex.stale),
+    );
+  }
 
   setTodayLine("claude-today", state.claude);
   setTodayLine("codex-today", state.codex);
 
   const divider = document.querySelector(".divider") as HTMLElement | null;
   if (divider) {
-    divider.style.display = state.claude.present && state.codex.present ? "" : "none";
+    divider.style.display = claudeVisible && codexVisible ? "" : "none";
   }
 
   resizeWindow();
@@ -342,10 +379,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   await listen<AppState>("state-updated", (e) => render(e.payload));
   await listen<Chip[]>("chips-updated", (e) => renderChips(e.payload));
   await listen<number>("apply-opacity", (e) => applyOpacity(e.payload));
+  await listen<MonitorSettings>("settings-updated", (e) => applySettings(e.payload));
 
   try {
-    const s = await invoke<{ opacity: number }>("get_settings");
-    applyOpacity(s.opacity);
+    const s = await invoke<MonitorSettings>("get_settings");
+    applySettings(s);
   } catch (_) {
     /* keep default opacity */
   }

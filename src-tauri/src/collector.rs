@@ -5,7 +5,7 @@
 //!     · 空闲 → 不按表轮询，直接睡到下一个 reset 时间点再刷（响应里带 resetsAt，空闲时唯一会变的就是 reset）；
 //!     · 从空闲恢复 / 手动⟳ / 启动 → 立即刷。
 use crate::config::SharedSettings;
-use crate::state::Shared;
+use crate::state::{Provider, Shared};
 use crate::{auth, quota, usage};
 use chrono::{DateTime, Utc};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -35,7 +35,7 @@ pub fn run(handle: AppHandle, shared: Shared, settings: SharedSettings, wake: Re
         let do_quota = force || now >= next_quota_at;
         force = false;
 
-        let total = refresh(&handle, &shared, &client, do_quota);
+        let total = refresh(&handle, &shared, &settings, &client, do_quota);
 
         // 活动探测：今日 token 增长 = 在烧额度
         let grew = prev_tokens.map(|p| total > p).unwrap_or(false);
@@ -116,16 +116,21 @@ fn schedule_next(shared: &Shared, active: bool, now: SystemTime) -> SystemTime {
 fn refresh(
     handle: &AppHandle,
     shared: &Shared,
+    settings: &SharedSettings,
     client: &reqwest::blocking::Client,
     do_quota: bool,
 ) -> u64 {
     // ---- 锁外完成所有 IO（文件 + 网络）----
-    let claude_present = auth::claude_present();
-    let codex_present = auth::codex_present();
-    let claude_creds = auth::read_claude();
-    let codex_creds = auth::read_codex();
-    let claude_usage = usage::scan_claude_today();
-    let codex_usage = usage::scan_codex_today();
+    let (enable_claude, enable_codex) = {
+        let s = settings.lock().unwrap();
+        (s.enable_claude, s.enable_codex)
+    };
+    let claude_present = enable_claude && auth::claude_present();
+    let codex_present = enable_codex && auth::codex_present();
+    let claude_creds = enable_claude.then(auth::read_claude).flatten();
+    let codex_creds = enable_codex.then(auth::read_codex).flatten();
+    let claude_usage = enable_claude.then(usage::scan_claude_today).flatten();
+    let codex_usage = enable_codex.then(usage::scan_codex_today).flatten();
 
     // Codex JWT 过期预检（Codex 无 refresh token，过期即失效）。
     // Claude 使用 OAuth refresh token 透明续期，expiresAt 过期不代表真的需要重新登录，
@@ -135,23 +140,40 @@ fn refresh(
         .map(|c| c.is_expired())
         .unwrap_or(false);
 
-    let claude_q = if do_quota {
+    let claude_q = if enable_claude && do_quota {
         claude_creds
             .as_ref()
             .map(|c| quota::fetch_claude(client, c))
     } else {
         None
     };
-    let codex_net = if do_quota && !codex_expired {
+    let codex_net = if enable_codex && do_quota && !codex_expired {
         codex_creds.as_ref().map(|c| quota::fetch_codex(client, c))
     } else {
         None
     };
-    let codex_cache = if do_quota && !codex_expired {
+    let codex_cache = if enable_codex && do_quota && !codex_expired {
         quota::read_codex_cache()
     } else {
         None
     };
+
+    // IO 期间可能刚好在设置页关闭服务；写回前再读一次，
+    // 避免一个已在途中的网络响应把已隐藏的卡片短暂重新点亮。
+    // 持有这次设置快照直到状态发布完成。这样如果用户正好在 IO 结束时关闭
+    // 服务，保存动作会排在本轮发布之后，并以「已关闭」快照收尾。
+    let current_settings = settings.lock().unwrap();
+    let enable_claude = enable_claude && current_settings.enable_claude;
+    let enable_codex = enable_codex && current_settings.enable_codex;
+    let claude_present = enable_claude && claude_present;
+    let codex_present = enable_codex && codex_present;
+    let claude_creds = enable_claude.then_some(claude_creds).flatten();
+    let codex_creds = enable_codex.then_some(codex_creds).flatten();
+    let claude_usage = enable_claude.then_some(claude_usage).flatten();
+    let codex_usage = enable_codex.then_some(codex_usage).flatten();
+    let claude_q = enable_claude.then_some(claude_q).flatten();
+    let codex_net = enable_codex.then_some(codex_net).flatten();
+    let codex_cache = enable_codex.then_some(codex_cache).flatten();
 
     // ---- 单次持锁写回 ----
     let (snapshot, total) = {
@@ -159,6 +181,9 @@ fn refresh(
         let mut synced = false;
 
         // ===== Claude =====
+        if !enable_claude {
+            st.claude = Provider::default();
+        }
         st.claude.present = claude_present;
         if let Some(u) = claude_usage {
             st.claude.today_tokens = Some(u.tokens);
@@ -193,6 +218,9 @@ fn refresh(
         }
 
         // ===== Codex（优先网络成功，退回本地缓存）=====
+        if !enable_codex {
+            st.codex = Provider::default();
+        }
         st.codex.present = codex_present;
         if let Some(u) = codex_usage {
             st.codex.today_tokens = Some(u.tokens);
@@ -201,7 +229,7 @@ fn refresh(
         if codex_creds.is_none() {
             st.codex.logged_in = false;
         }
-        if do_quota && codex_expired {
+        if enable_codex && do_quota && codex_expired {
             st.codex.stale = true;
             st.codex.error = Some("令牌已过期，请重新运行 codex".into());
         }
@@ -225,34 +253,32 @@ fn refresh(
                         .and_then(parse_iso)
                         .map(|until| until > now)
                         .unwrap_or(false);
-                    let genuine_recovery =
-                        r.plan_type.as_deref() != Some("free") || r.has_credits;
+                    let genuine_recovery = r.plan_type.as_deref() != Some("free") || r.has_credits;
 
                     if r.blocked {
                         // 明确耗尽：记录恢复时间，用响应值整体覆盖，冲掉残留乐观值。
                         st.codex.blocked = true;
-                        st.codex.blocked_until =
-                            r.five_hour.as_ref().and_then(|w| w.resets_at.clone());
+                        let limiting = r
+                            .five_hour
+                            .as_ref()
+                            .filter(|w| w.remaining <= 0.0)
+                            .or_else(|| r.seven_day.as_ref().filter(|w| w.remaining <= 0.0))
+                            .or(r.five_hour.as_ref())
+                            .or(r.seven_day.as_ref());
+                        st.codex.blocked_until = limiting.and_then(|w| w.resets_at.clone());
                         st.codex.five_hour = r.five_hour.clone();
                         st.codex.seven_day = r.seven_day.clone();
                     } else if sticky && !genuine_recovery {
-                        // 瞬时乐观值：压制，继续显示耗尽（保留恢复时间）。
+                        // 瞬时乐观值：压制，继续显示耗尽并保留上次真实窗口/恢复时间。
                         st.codex.blocked = true;
-                        st.codex.five_hour = Some(crate::state::Window {
-                            remaining: 0.0,
-                            resets_at: st.codex.blocked_until.clone(),
-                        });
-                        st.codex.seven_day = None;
                     } else {
                         // 真实可用（或已过恢复时间）：解除封禁，正常更新窗口。
                         st.codex.blocked = false;
                         st.codex.blocked_until = None;
-                        if r.five_hour.is_some() {
-                            st.codex.five_hour = r.five_hour.clone();
-                        }
-                        if r.seven_day.is_some() {
-                            st.codex.seven_day = r.seven_day.clone();
-                        }
+                        // 实时响应是权威快照；None 也要覆盖，避免接口从 5h+7d 切换成
+                        // “仅 7d”后把旧的 5h 窗口残留在界面上。
+                        st.codex.five_hour = r.five_hour.clone();
+                        st.codex.seven_day = r.seven_day.clone();
                     }
                     st.codex.stale = false;
                     st.codex.error = None;
@@ -267,12 +293,8 @@ fn refresh(
             if !applied {
                 if let Some(r) = &codex_cache {
                     st.codex.logged_in = true;
-                    if r.five_hour.is_some() {
-                        st.codex.five_hour = r.five_hour.clone();
-                    }
-                    if r.seven_day.is_some() {
-                        st.codex.seven_day = r.seven_day.clone();
-                    }
+                    st.codex.five_hour = r.five_hour.clone();
+                    st.codex.seven_day = r.seven_day.clone();
                     st.codex.stale = false;
                     st.codex.error = None;
                     synced = true;
@@ -295,6 +317,7 @@ fn refresh(
     };
 
     let _ = handle.emit("state-updated", snapshot);
+    drop(current_settings);
     total
 }
 

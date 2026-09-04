@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    /// 是否监控对应服务。关闭后隐藏卡片和信号，同时停止本地扫描与额度请求。
+    pub enable_claude: bool,
+    pub enable_codex: bool,
     // ── 信号灯 ──────────────────────────────────────────────────
     /// 显示哪些信号条（同时决定是否在该状态弹桌面通知）。
     pub show_done: bool,
@@ -32,6 +35,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            enable_claude: true,
+            enable_codex: true,
             show_done: true,
             show_waiting: true,
             show_error: true,
@@ -109,4 +114,17 @@ pub fn is_autostart_enabled() -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settings_keep_both_providers_enabled() {
+        let settings: Settings = serde_json::from_str(r#"{"opacity":0.75}"#).unwrap();
+        assert!(settings.enable_claude);
+        assert!(settings.enable_codex);
+        assert_eq!(settings.opacity, 0.75);
+    }
 }

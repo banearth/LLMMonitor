@@ -146,6 +146,10 @@ pub fn fetch_codex(client: &reqwest::blocking::Client, creds: &CodexCreds) -> Re
 /// 同时给“网络响应”和“本地缓存 usage-limits.json”复用的解析。
 /// 形状：{"rate_limit":{"primary_window":{"used_percent":0,"reset_at":<epoch s>}, "secondary_window":{...}}}
 /// 也兼容把 rate_limit 直接放在顶层、或字段名为 utilization / resets_at(ISO) 的情况。
+///
+/// `primary_window` / `secondary_window` 只是接口里的顺序，并不保证分别是 5h / 7d。
+/// 新版接口在部分套餐上会只把 7d 窗口放进 primary，因此优先依据
+/// `limit_window_seconds` 判断窗口类型；老响应没有该字段时才沿用位置兜底。
 pub fn parse_codex_value(v: &Value) -> QuotaResult {
     let rl = v.get("rate_limit").unwrap_or(v);
 
@@ -164,7 +168,7 @@ pub fn parse_codex_value(v: &Value) -> QuotaResult {
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
 
-    let parse = |key: &str| -> Option<Window> {
+    let parse = |key: &str| -> Option<(Window, Option<u64>)> {
         let o = rl.get(key)?;
         if !o.is_object() {
             return None;
@@ -185,15 +189,50 @@ pub fn parse_codex_value(v: &Value) -> QuotaResult {
                     .and_then(|x| x.as_str())
                     .map(String::from)
             });
-        Some(Window {
-            remaining: remaining_from_util(used),
-            resets_at,
-        })
+        Some((
+            Window {
+                remaining: remaining_from_util(used),
+                resets_at,
+            },
+            o.get("limit_window_seconds").and_then(|x| x.as_u64()),
+        ))
     };
 
+    #[derive(Clone, Copy)]
+    enum Slot {
+        FiveHour,
+        SevenDay,
+    }
+
+    const FIVE_HOURS: u64 = 5 * 60 * 60;
+    const SEVEN_DAYS: u64 = 7 * 24 * 60 * 60;
+    let mut five_hour = None;
+    let mut seven_day = None;
+    for (parsed, fallback) in [
+        (parse("primary_window"), Slot::FiveHour),
+        (parse("secondary_window"), Slot::SevenDay),
+    ] {
+        let Some((window, duration)) = parsed else {
+            continue;
+        };
+        let slot = match duration {
+            Some(FIVE_HOURS) => Slot::FiveHour,
+            Some(SEVEN_DAYS) => Slot::SevenDay,
+            _ => fallback,
+        };
+        match slot {
+            Slot::FiveHour => {
+                five_hour.get_or_insert(window);
+            }
+            Slot::SevenDay => {
+                seven_day.get_or_insert(window);
+            }
+        };
+    }
+
     QuotaResult {
-        five_hour: parse("primary_window"),
-        seven_day: parse("secondary_window"),
+        five_hour,
+        seven_day,
         logged_in: true,
         blocked,
         plan_type,
@@ -272,8 +311,16 @@ mod tests {
             "rate_limit": {
                 "allowed": true,
                 "limit_reached": false,
-                "primary_window": { "used_percent": 5, "reset_at": 1785170765i64 },
-                "secondary_window": { "used_percent": 20, "reset_at": 1785200000i64 }
+                "primary_window": {
+                    "used_percent": 5,
+                    "limit_window_seconds": 18_000,
+                    "reset_at": 1785170765i64
+                },
+                "secondary_window": {
+                    "used_percent": 20,
+                    "limit_window_seconds": 604_800,
+                    "reset_at": 1785200000i64
+                }
             }
         });
         let r = parse_codex_value(&v);
@@ -281,6 +328,29 @@ mod tests {
         assert_eq!(r.plan_type.as_deref(), Some("plus"));
         assert_eq!(r.five_hour.unwrap().remaining, 95.0);
         assert_eq!(r.seven_day.unwrap().remaining, 80.0);
+    }
+
+    /// 新版响应可能只有 primary_window，且它实际是 7 天窗口；不能再误标成 5h。
+    #[test]
+    fn weekly_primary_window_is_classified_by_duration() {
+        let v = json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                    "used_percent": 3,
+                    "limit_window_seconds": 604_800,
+                    "reset_at": 1788779493i64
+                },
+                "secondary_window": null
+            }
+        });
+        let r = parse_codex_value(&v);
+        assert!(r.five_hour.is_none());
+        let weekly = r.seven_day.expect("7 天 primary_window 应归入 seven_day");
+        assert_eq!(weekly.remaining, 97.0);
+        assert!(weekly.resets_at.is_some());
     }
 
     /// 缺失 allowed/limit_reached（老缓存形状）：不应误判为 blocked。
